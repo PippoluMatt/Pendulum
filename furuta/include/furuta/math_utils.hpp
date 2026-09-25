@@ -25,21 +25,32 @@ namespace furuta
         return std::clamp(x, minValue, maxValue);
     }
 
-    inline bool homing(const SensorData& sensor)
-    // Homing: true se il pendolo e' fermo sulla posizione di riferimento
-    // (alpha = 0). La tolleranza e' legata alla risoluzione dell'AS5600
+    // Tolleranze del criterio di quiete, condivise con chi fa controlli
+    // aggiuntivi sullo stesso asse (es. la velocita' stimata da SimpleFOC).
+    inline constexpr double HOMING_ANGLE_TOLERANCE = 2.0 * (2.0 * M_PI / 4096.0);  // ~3.1 mrad
+    inline constexpr double HOMING_VELOCITY_TOLERANCE = 0.4;                        // rad/s
+
+    inline bool atRest(double angle, double angleDot)
+    // Homing: true se l'asse e' fermo sulla posizione di riferimento
+    // (angolo = 0). La tolleranza e' legata alla risoluzione dell'AS5600
     // (1 LSB = 2*pi/4096 rad ~ 1.53 mrad): l'epsilon di macchina (~2.2e-16 rad)
     // non sarebbe mai raggiungibile.
-    // Serve anche il criterio di quiete: alpha passa per lo zero anche a
+    // Serve anche il criterio di quiete: l'angolo passa per lo zero anche a
     // velocita' massima. Per un homing robusto il chiamante dovrebbe comunque
     // richiedere la condizione per piu' campioni consecutivi.
     {
-        constexpr double oneLsb{2.0 * M_PI / 4096.0};
-        constexpr double angleTolerance{2.0 * oneLsb};  // ~3.1 mrad
-        constexpr double velocityTolerance{0.5};        // rad/s, sopra il rumore filtrato
+        return std::abs(angle) < HOMING_ANGLE_TOLERANCE
+            && std::abs(angleDot) < HOMING_VELOCITY_TOLERANCE;
+    }
 
-        return std::abs(sensor.theta) < angleTolerance
-            && std::abs(sensor.theta) < velocityTolerance;
+    inline double referenceAngle(double rawAngle, double offset)
+    {
+        return clamp(rawAngle - offset, -2.0 * M_PI, 2.0*M_PI);
+    }
+
+    inline double homeTarget(double sensorDirection, double offset)
+    {
+        return sensorDirection * offset;
     }
 
 } // furuta namespace

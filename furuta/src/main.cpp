@@ -20,23 +20,9 @@ furuta::SensorData getAngles(double t)
 
 int main()
 {
-    constexpr double dt{0.01};
-    constexpr float samplingHz{static_cast<float>(1.0 / dt)};
-    constexpr float cutoffHz{20.0f};  // -3 dB del passa-basso
-    furuta::AS5600VelocityEstimator thetaEstimator{cutoffHz, samplingHz};
-    furuta::AS5600VelocityEstimator alphaEstimator{cutoffHz, samplingHz};
+   
 
-    furuta::SensorData sensors {};
-    for (double t{0.0}; t <= 5.0; t += dt)
-    {
-        sensors = getAngles(t);
-        furuta::updateSensors(sensors, thetaEstimator, alphaEstimator);
-        std::cout << "Theta: " << sensors.theta << " ThetaDot: " << sensors.thetaDotFiltered
-        << " Alpha: " << sensors.alpha << " AlphaDot: " << sensors.alphaDotFiltered << "\n\n";
-    }
-    
-
-    furuta::MechanicalParameters parameters{};
+    furuta::ActuatorLimits parameters{};
     furuta::Motor motor {parameters};
 
 

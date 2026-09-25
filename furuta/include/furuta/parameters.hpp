@@ -37,5 +37,11 @@ struct ActuatorLimits
     int mode{0};
 };
 
+struct  ControlOutput
+{
+    ;
+};
+
+
 } // namespace furuta
 #endif
