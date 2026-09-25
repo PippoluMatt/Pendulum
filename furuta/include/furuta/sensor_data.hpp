@@ -9,9 +9,6 @@ struct SensorData
     double theta{0.0};       // rad
     double alpha{0.0};       // rad
     
-    double thetaPrev{0.0};   // rad
-    double alphaPrev{0.0};   // rad
-
     double thetaDotFiltered{0.0};    // rad/s
     double alphaDotFiltered{0.0};    // rad/s
 };
