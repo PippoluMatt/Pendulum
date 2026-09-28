@@ -3,20 +3,15 @@
 
 namespace furuta {
 
+inline constexpr double gravity{9.81};
+inline constexpr double mu{0.00125};
+
 // Dati puri: nessuna logica, trivially copyable (48 byte).
-struct MechanicalParameters
+struct PinwheelParameters
 {   
-    // dimensions come from https://en.wikipedia.org/wiki/Furuta_pendulum
-    const double pendulumMass{16.30};       // m2
-    const double pendulumToCoM{46.35};      // l2
-    const double pendulumLenght{94.4};      // L2
-
-    const double pinwheelMass{96.57};       // m1
-    const double pinwheelToCoM{7.02};       // l1
-    const double pendulumToCenter{77.82};   // L1
-
-    const double gravity{-9.81};
-    
+    const double pinwheelMass{0.09657};       // m1
+    const double pinwheelToCoM{0.00702};       // l1
+    const double pendulumToCenter{0.07782};   // L1  
 };
 
 struct ActuatorLimits
@@ -28,13 +23,21 @@ struct ActuatorLimits
     double nRPM{3000.0};
 
     double maxTorque{};
-    double maxArmVelocity{};
-    double maxArmAngle{};
-    double minArmAngle{};
     double maxCurrent{};
-
     
     int mode{0};
+};
+
+struct ArmParameters
+{
+    // dimensions come from https://en.wikipedia.org/wiki/Furuta_pendulum
+    const double pendulumMass{0.0210};       // m2
+    const double pendulumToCoM{0.04635};      // l2
+    const double pendulumLenght{0.0944};      // L2
+    
+    const double pendulumEnPot{pendulumMass * gravity * pendulumToCoM};
+    const double J_xx {3.962E-4};
+    const double J_yy {2.68E-4};
 };
 
 struct  ControlOutput
