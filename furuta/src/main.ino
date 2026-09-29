@@ -3,43 +3,40 @@
 //
 // Catena di controllo implementata nel loop():
 //   1) errE -> thetaDDot_cmd        EnergySwingUpController::compute()
-//   2) thetaDDot_cmd -> tau         FurutaDynamics::torqueForArmAcceleration()
-//   3) tau -> i -> V                percorso A (README §8): i = tau/kt,
-//                                   V = R*i + ke*thetaDot con ke = kt (SI)
-//   4) V -> motore                  SimpleFOC in MotionControlType::torque
+//   2) richiamo al centro + integratore -> riferimento di velocita' del braccio
+//   3) thetaDDot -> tau -> i -> V   feed-forward dal modello
+//   4) PI di velocita' + modello   SimpleFOC, comando totale limitato a 2 V
 //
-// FUNZIONI DA IMPLEMENTARE NELLA LIBRERIA furuta (segnate [LIB-TODO] nel codice):
-//   - Motor::currentForTorque(double tau)             [motor.hpp]  i = tau/kt
-//   - Motor::voltageForCurrent(double i, double w)    [motor.hpp]  V = R*i + kt*w
-//   - ActuatorLimits::phaseResistance [ohm]           [parameters.hpp] (oggi assente)
-//   - limiti maxTorque/maxCurrent (oggi vuoti)        [parameters.hpp]
-//   - esposizione di dynamics.hpp/energy_swing_up.hpp da furuta.hpp (da valutare:
-//     dynamics.hpp tira dentro Eigen)
-// thetaDDot -> tau e' gia' in libreria (dynamics.hpp), esposta solo a questo
-// sketch: la conversione usata qui e' quella, non una formula duplicata.
+// La catena di conversione (README §8, percorso A) e' in libreria:
+//   FurutaDynamics::torqueForArmAcceleration(...)   [dynamics.hpp]
+//   Motor::currentForTorque(tau)                    [motor.hpp]
+//   Motor::voltageForCurrent(i, thetaDot)           [motor.hpp]
+// con R = ActuatorLimits::phaseResistance [parameters.hpp].
+// Restano da identificare maxTorque/maxCurrent (oggi vuoti): la saturazione
+// e' quindi solo il limite di tensione dello sketch, non un limite di libreria.
 
 #include <furuta.hpp>
 // dynamics.hpp usa Eigen (ArduinoEigen): incluso esplicitamente per non
 // appesantire furuta.hpp per gli sketch che non ne hanno bisogno.
+// energy_swing_up.hpp e swing_sequence.hpp sono esposte da furuta.hpp.
 #include <furuta/dynamics.hpp>
-#include <furuta/energy_swing_up.hpp>
 #include <SimpleFOC.h>
+#include <cstdio>
 
 // ===========================================================================
 // Configurazione
 // ===========================================================================
 
 static constexpr uint32_t PERIOD_US = 1000;
-static constexpr float FS_HZ = 1.06e6f / PERIOD_US;
+static constexpr float FS_HZ = 1.0e6f / PERIOD_US; // nominale; il filtro usa il dt misurato
 static constexpr float    FC_HZ      = 20.0f;      // taglio passa-basso
-static constexpr uint16_t HOMING_SAMPLES = 200;    // campioni consecutivi di quiete sullo zero (debounce)
-static constexpr double   RAD_PER_COUNT  = 2.0 * M_PI / 4096.0;
 
 // Offset meccanico del pendolo: alpha = 0 con il pendolo appeso (E = 0).
 // Lo zero dell'AS5600 del pendolo e' ruotato di 180 gradi (da verificare:
 // pendolo appeso fermo -> ErrE ~= E* = 2*m*g*l ~= 0.0279 J; se ErrE ~= 0
 // l'offset e' sbagliato di pi).
 static constexpr double ALPHA_OFFSET = M_PI;
+static constexpr double THETA_OFFSET = M_PI; // stesso zero meccanico di furuta.ino
 
 // Segno di alpha nella convenzione del modello. La terna del modello e' fissata
 // dal verso positivo del motore (theta = theta_FOC); il verso positivo di alpha
@@ -48,10 +45,7 @@ static constexpr double ALPHA_OFFSET = M_PI;
 // (ErrE cresce invece di calare), invertire questo segno.
 static constexpr double swingDirection = -1.0;
 
-// Profilo di homing (non usato dallo swing-up: theta non entra nella legge,
-// serve solo thetaDot). Lasciato per compatibilita' con furuta.ino.
-static constexpr float NOMINAL_P_ANGLE = 20.0f;
-static constexpr float NOMINAL_VELOCITY_LIMIT = 50.0f * _2PI / 60.0f;
+// Profilo di homing come in furuta.ino.
 static constexpr float HOMING_P_ANGLE = 8.0f;
 static constexpr float HOMING_VELOCITY_LIMIT = 2.0f;
 
@@ -68,22 +62,24 @@ static constexpr int PIN_PWM_A = 6;
 static constexpr int PIN_PWM_B = 5;
 static constexpr int PIN_PWM_C = 4;
 
-// Swing-up (README §7.2-7.3): k decide quanto in alto arriva il pendolo
-// (piu' k = piu' vicino alla verticale), maxArmAcceleration e' il tetto di
-// accelerazione del braccio e ne decide la violenza/rapidita'.
-// TARGET_ENERGY_FRACTION < 1 ferma il target sotto E* (separatrice): il pendolo
-// sale gradualmente in 3-4 s fino a ~35-40 gradi dalla verticale e ricade,
-// senza mai passare in rotazione a 360 gradi.
-// Sweep simulato host (RK4 1 ms): k=500, maxA=15, f=0.93 -> ~3.0-3.4 s,
-// |thetaDot| <= ~3.6 rad/s, E_finale ~0.92 E*.
+// Il target energetico decide l'ampiezza; k corregge l'errore di energia.
+// maxArmAcceleration limita l'intensita' delle pompate.
+// TARGET_ENERGY_FRACTION < 1 pone il target sotto la verticale, ma non e'
+// una garanzia contro rotazioni in presenza di errori di stima o di modello.
+// Con PI interno, richiamo al centro e attrito del braccio (0-0.01 N*m),
+// partenza da +/-20 gradi: target in ~4.0-4.4 s a dt=1 ms in simulazione.
+// I valori d'attrito sono ipotesi di test, non un'identificazione del banco.
+// Questi tempi vanno verificati sul banco; qui non c'e' un controllore di equilibrio.
 static constexpr double SWING_UP_GAIN = 500.0;
-static constexpr double MAX_ARM_ACCELERATION = 15.0;
-static constexpr double TARGET_ENERGY_FRACTION = 0.90;
+static constexpr double MAX_ARM_ACCELERATION = furuta::SwingSequence::maxAcceleration;
+static constexpr double TARGET_ENERGY_FRACTION = 0.95;
 
-// Resistenza di fase [ohm] per V = R*i + ke*thetaDot (README §8).
-// [LIB-TODO] dovrebbe stare in ActuatorLimits (parameters.hpp); valore di
-// partenza provvisorio, DA IDENTIFICARE sul motore reale.
-static constexpr double PHASE_RESISTANCE = 1.38;
+// Il modello da solo non compensa l'attrito statico osservato sul banco.
+// Il PI gia' usato nell'homing corregge l'errore fra velocita' richiesta e reale.
+// Ogni contributo (modello e PI) dispone di meta' della tensione: la somma
+// resta entro SWING_VOLTAGE_LIMIT anche con il feed-forward di SimpleFOC.
+static constexpr double MAX_ARM_VELOCITY = furuta::SwingSequence::maxVelocity;
+static constexpr float SWING_VOLTAGE_LIMIT = 2.0f;
 
 // ===========================================================================
 // Oggetti
@@ -100,39 +96,16 @@ furuta::EnergySwingUpController swingUp{
              SWING_UP_GAIN, MAX_ARM_ACCELERATION, TARGET_ENERGY_FRACTION}};
 furuta::SensorData s{};
 furuta::AS5600VelocityEstimator alphaEstimator{
-    furuta::VelocityFilterMode::Kalman, FC_HZ, FS_HZ};
+    furuta::VelocityFilterMode::AlphaBeta, FC_HZ, FS_HZ};
+uint32_t lastAlphaSampleUs = 0;
+furuta::SwingSequence sequence;
+double thetaHome = 0.0; // setpoint FOC assoluto; theta di lavoro = shaftAngle - thetaHome
 
 MagneticSensorI2C armSensor = MagneticSensorI2C(AS5600_I2C);       // theta (bus Wire)
 MagneticSensorI2C pendulumSensor = MagneticSensorI2C(AS5600_I2C);  // alpha (bus Wire1)
 BLDCMotor motor = BLDCMotor(MOTOR_POLE_PAIRS);
 BLDCDriver3PWM driver = BLDCDriver3PWM(PIN_PWM_A, PIN_PWM_B, PIN_PWM_C);
 Commander command = Commander(Serial);
-
-// ===========================================================================
-// Conversione thetaDDot -> tau -> i -> V  (README §8, percorso A)
-//
-// 1) thetaDDot -> tau: inversa esatta del modello con cerniera passiva
-//    (tau2 = 0), GIA' in libreria:
-//      FurutaDynamics::torqueForArmAcceleration(alpha, thetaDot, alphaDot, thetaDDot)
-//
-// I passi 2 e 3 non esistono ancora nella libreria: vivono qui e sono marcati
-// [LIB-TODO] con la firma che dovranno avere una volta portati in motor.hpp.
-// ===========================================================================
-
-// tau [N*m] -> corrente i [A]
-static double torqueToCurrent(double tau)
-{
-    // [LIB-TODO] Motor::currentForTorque(tau)
-    return tau / motorModel.kt();
-}
-
-// i [A] + thetaDot [rad/s] -> tensione q [V]: V = R*i + ke*thetaDot,
-// con ke = kt in unita' SI (V*s/rad).
-static double currentToVoltage(double current, double thetaDot)
-{
-    // [LIB-TODO] Motor::voltageForCurrent(current, thetaDot)
-    return PHASE_RESISTANCE * current + motorModel.kt() * thetaDot;
-}
 
 // ===========================================================================
 // Setup
@@ -157,12 +130,17 @@ void setup() {
   driver.init();
   motor.linkDriver(&driver);
 
-  // controllo di coppia in tensione: il target di move() e' Vq (README §8).
-  // Limite = 24 V: il percorso A comanda V = R*i + ke*thetaDot, non la tensione
-  // del bus, quindi il limite del bus serve solo a saturare il comando.
-  motor.controller = MotionControlType::torque;
+  // Prima homing in posizione, poi swing con anello interno di velocita'.
+  motor.controller = MotionControlType::angle;
   motor.torque_controller = TorqueControlType::voltage;
-  motor.voltage_limit = actuatorParams.voltage;
+  motor.PID_velocity.P = 0.2f;
+  motor.PID_velocity.I = 20.0f;
+  motor.PID_velocity.D = 0.0f;
+  motor.PID_velocity.output_ramp = 1000.0f; // profilo homing di furuta.ino
+  motor.LPF_velocity.Tf = 0.01f;
+  motor.P_angle.P = HOMING_P_ANGLE;
+  motor.velocity_limit = HOMING_VELOCITY_LIMIT;
+  motor.voltage_limit = 6.0f; // homing come in furuta.ino; poi limite a 2 V
 
   motor.useMonitoring(Serial);
 
@@ -170,10 +148,18 @@ void setup() {
   // align sensor and start FOC
   motor.initFOC();
 
+  thetaHome = furuta::homeTarget(motor.sensor_direction, THETA_OFFSET);
+  motor.PID_velocity.reset();
+  // Il limite e' in volt: non e' una misura o una regolazione della corrente.
+  Serial.printf("SwingUp homing+wait+center: gain=%.0f,maxA=%.1f,targetE=%.2f,maxW=%.1f,maxV=%.1f,thetaLimit=+/-2pi\n",
+      SWING_UP_GAIN, MAX_ARM_ACCELERATION, TARGET_ENERGY_FRACTION,
+      MAX_ARM_VELOCITY, static_cast<double>(SWING_VOLTAGE_LIMIT));
+
   // Aggancia lo stimatore alla lettura corrente: il primo campione non
   // genera uno spike di velocita'.
   s.alpha = swingDirection * furuta::referenceAngle(pendulumSensor.getSensorAngle(), ALPHA_OFFSET);
   alphaEstimator.reset(s.alpha);
+  lastAlphaSampleUs = micros();
 }
 
 // ===========================================================================
@@ -187,67 +173,102 @@ void loop() {
 
   // Pendolo: alpha = 0 appeso + stima filtrata di alphaDot.
   s.alpha = swingDirection * furuta::referenceAngle(pendulumSensor.getSensorAngle(), ALPHA_OFFSET);
-  s.alphaDotFiltered = alphaEstimator.update(s.alpha);
+  const uint32_t alphaSampleUs = micros();
+  const uint32_t samplePeriodUs = alphaSampleUs - lastAlphaSampleUs;
+  lastAlphaSampleUs = alphaSampleUs;
+  s.alphaDotFiltered = alphaEstimator.update(s.alpha, samplePeriodUs * 1.0e-6f);
+  static uint32_t maxSamplePeriodUs = 0;
+  if (samplePeriodUs > maxSamplePeriodUs) maxSamplePeriodUs = samplePeriodUs;
 
   // Braccio: thetaDot dal sensore FOC (sensor_direction gia' applicato da
   // SimpleFOC), quindi nello stesso verso positivo della coppia comandata.
   // motor.shaft_velocity e' aggiornato da move() al giro precedente (~1 ms).
   s.thetaDotFiltered = motor.shaft_velocity;
+  // Angolo continuo, senza wrap/clamp: un giro oltre il limite deve restare visibile.
+  s.theta = motor.shaftAngle() - thetaHome;
 
   // --- catena di controllo -------------------------------------------------
   // 1) legge di swing-up: errE -> thetaDDot_cmd (saturata su maxArmAcceleration)
   const furuta::controlOutput cmd = swingUp.compute(s);
 
+  const double dt = samplePeriodUs * 1.0e-6;
+  const auto previousPhase = sequence.phase;
+  sequence.update(s, cmd.armAcceleration, dt);
+  const bool pumping = sequence.phase == furuta::SwingSequence::Phase::Swing;
+  if (sequence.phase != previousPhase) {
+    motor.controller = pumping ? MotionControlType::velocity : MotionControlType::angle;
+    motor.velocity_limit = pumping ? MAX_ARM_VELOCITY : HOMING_VELOCITY_LIMIT;
+    motor.voltage_limit = SWING_VOLTAGE_LIMIT;
+    motor.PID_velocity.limit = pumping ? SWING_VOLTAGE_LIMIT / 2.0f : SWING_VOLTAGE_LIMIT;
+    motor.PID_velocity.output_ramp = 100.0f;
+    motor.LPF_velocity.Tf = 0.005f;
+    motor.PID_velocity.reset();
+    // Il log del banco (29/09) mostra che il hold a centro con il PI di
+    // velocita' va in stick-slip: l'integrale carica contro l'attrito statico
+    // (V PI costante ~0.34 V), poi slitta e il kick eccita il pendolo
+    // (ThetaDot ~10 rad/s, AlphaDot ~-12 rad/s) che rimbalza sull'arm. In
+    // attesa e assestamento il driver viene quindi disabilitato, come in
+    // furuta.ino: il pendolo si smorza da solo e il braccio resta libero.
+    // Il rientro al centro (RETURNING) e lo swing restano abilitati.
+    if (sequence.phase == furuta::SwingSequence::Phase::Settling
+        || sequence.phase == furuta::SwingSequence::Phase::Waiting) {
+      motor.disable();
+    } else {
+      motor.enable();
+    }
+  }
+
   // 2) thetaDDot_cmd -> tau: inversa del modello, cerniera passiva tau2 = 0
-  const double tau = dynamics.torqueForArmAcceleration(
-      s.alpha, s.thetaDotFiltered, s.alphaDotFiltered, cmd.armAcceleration);
+  const double tau = pumping ? dynamics.torqueForArmAcceleration(
+      s.alpha, s.thetaDotFiltered, s.alphaDotFiltered, sequence.acceleration) : 0.0;
 
-  // 3) tau -> i -> V (percorso A: i = tau/kt, V = R*i + ke*thetaDot)
-  const double current = torqueToCurrent(tau);
-  const double voltage = currentToVoltage(current, s.thetaDotFiltered);
+  // 3) tau -> i -> V (percorso A in libreria: Motor::currentForTorque/voltageForCurrent)
+  const double current = motorModel.currentForTorque(tau);
+  const double modelVoltage = pumping ? furuta::clamp(
+      motorModel.voltageForCurrent(current, s.thetaDotFiltered),
+      -SWING_VOLTAGE_LIMIT / 2.0, SWING_VOLTAGE_LIMIT / 2.0) : 0.0;
 
-  // 4) comando al motore (SimpleFOC satura su voltage_limit)
-  motor.move(voltage);
+  // 4) Il PI aumenta lo sforzo se il braccio non segue il riferimento.
+  motor.feed_forward_voltage.q = modelVoltage;
+  // Fuori dallo swing tiene/riporta il braccio allo zero; nessun pompaggio.
+  motor.move(pumping ? sequence.velocityTarget : thetaHome);
+  // Con il driver disabilitato move() esce prima di aggiornare current_sp e
+  // shaft_velocity_sp: in diagnostica vanno azzerati per non mostrare valori
+  // congelati nell'attesa (State SETTLING/WAIT_PUSH).
+  const double voltage = motor.enabled
+      ? motor.current_sp + motor.feed_forward_voltage.q : 0.0;
+  const double velocityTarget = motor.enabled ? motor.shaft_velocity_sp : 0.0;
 
   // --- diagnostica seriale (CSV: separatore ",") ---------------------------
+  // Una riga ogni 100 ms, trasmessa a piccoli blocchi solo se c'e' spazio.
+  // Le Serial.print consecutive bloccavano FOC e controllo per ~14 ms.
   static unsigned long last_print = 0;
-  if (millis() - last_print >= 100) {
+  static char diagnostics[384];
+  static size_t diagnosticsLength = 0;
+  static size_t diagnosticsSent = 0;
+  if (diagnosticsSent == diagnosticsLength && millis() - last_print >= 100) {
     last_print = millis();
-    Serial.print(F("Alpha: "));
-    Serial.print(s.alpha, 4);
-    Serial.print(F(","));
-    Serial.print(F("AlphaDot stimata: "));
-    Serial.print(s.alphaDotFiltered, 4);
-    Serial.print(F(","));
-    Serial.print(F("ThetaDot: "));
-    Serial.print(s.thetaDotFiltered, 4);
-    Serial.print(F(","));
-    Serial.print(F("ErrE: "));
-    Serial.print(swingUp.energyError(s), 6);
-    Serial.print(F(","));
-    Serial.print(F("ThetaDDot: "));
-    Serial.print(cmd.armAcceleration, 3);
-    Serial.print(F(","));
-    Serial.print(F("Tau: "));
-    Serial.print(tau, 5);
-    Serial.print(F(","));
-    Serial.print(F("I: "));
-    Serial.print(current, 3);
-    Serial.print(F(","));
-    Serial.print(F("V: "));
-    Serial.print(voltage, 3);
-    Serial.print(F(","));
-    Serial.print(F("Omega value Jxx: "));
-    Serial.print(sqrt(arm.pendulumEnPot / arm.J_xx), 4);
-    Serial.print(F(","));
-    Serial.print(F("T value Jxx: "));
-    Serial.print(2* M_PI * (1 / sqrt(arm.pendulumEnPot / arm.J_xx)), 4);
-    Serial.print(F(","));
-    Serial.print(F("Omega value Jyy: "));
-    Serial.print(sqrt(arm.pendulumEnPot / arm.J_yy), 4);
-    Serial.print(F(","));
-    Serial.print(F("T value Jyy: "));
-    Serial.println(2* M_PI * (1 / sqrt(arm.pendulumEnPot / arm.J_yy)), 4);
+    const int length = std::snprintf(diagnostics, sizeof(diagnostics),
+        "State: %s,Alpha: %.4f,AlphaDot stimata: %.4f,Theta: %.4f,ThetaDot: %.4f,"
+        "ThetaDot target: %.4f,ErrE: %.6f,ThetaDDot: %.3f,Tau modello: %.5f,"
+        "V modello: %.3f,V PI: %.3f,V: %.3f,dt max us: %lu\n",
+        sequence.name(), s.alpha, s.alphaDotFiltered, s.theta,
+        s.thetaDotFiltered, velocityTarget,
+        swingUp.energyError(s), sequence.acceleration,
+        tau, modelVoltage, motor.enabled ? static_cast<double>(motor.current_sp) : 0.0,
+        voltage,
+        static_cast<unsigned long>(maxSamplePeriodUs));
+    diagnosticsLength = (length > 0 && static_cast<size_t>(length) < sizeof(diagnostics))
+        ? static_cast<size_t>(length) : 0;
+    diagnosticsSent = 0;
+    maxSamplePeriodUs = 0;
+  }
+  const int serialSpace = Serial.availableForWrite();
+  if (serialSpace > 0 && diagnosticsSent < diagnosticsLength) {
+    const size_t count = std::min(diagnosticsLength - diagnosticsSent,
+        std::min(static_cast<size_t>(serialSpace), static_cast<size_t>(32)));
+    diagnosticsSent += Serial.write(
+        reinterpret_cast<const uint8_t*>(diagnostics + diagnosticsSent), count);
   }
 
   // user communication

@@ -2,7 +2,7 @@
 
 Questo repository raccoglie il codice C++17 e gli strumenti di sviluppo per un **pendolo di Furuta**: un sistema meccanico *sottattuato* (due gradi di libertà, un solo attuatore), fortemente non lineare, usato come banco di prova per tecniche di controllo. L'obiettivo del progetto è portare il pendolo dalla posizione di riposo (appeso) alla verticale tramite una legge di **swing-up a energia** e, in prospettiva, mantenerlo in equilibrio con un controllore di stabilizzazione.
 
-> **Stato del progetto.** Alcune parti descritte in questo README — il modello dinamico in forma matriciale, il solutore Runge-Kutta 4, la legge di swing-up completa, la saturazione e la mappatura su tensione — sono **design previsto e non ancora implementate**. La tabella in [§11](#11-stato-dellimplementazione-e-roadmap) distingue in modo esplicito ciò che è operativo da ciò che è pianificato. Il resto (parametri, filtri di velocità, calcolo dell'energia, stima di $k_t$ e $k_V$) è codice reale in questo repository.
+> **Stato del progetto.** Il solutore Runge-Kutta 4 e il controllore di stabilizzazione in cima sono **design previsto e non ancora implementati**; la tabella in [§11](#11-stato-dellimplementazione-e-roadmap) distingue ciò che è operativo da ciò che è pianificato. Il resto è codice reale: parametri, modello dinamico, filtri di velocità, energia e legge di swing-up (con target sotto la verticale), sequenza di avvio (`swing_sequence.hpp`), mappatura $\ddot\theta \to \tau \to i \to V$, stima di $k_t$/$k_V$, smoke test host (`main.cpp`) e firmware board (`main.ino`, SimpleFOC + due AS5600), di cui esiste un primo log del banco in `data/data.csv`.
 
 ## Indice
 
@@ -58,6 +58,7 @@ I limiti dell'attuatore sono raccolti in `ActuatorLimits` (`furuta/include/furut
 | `poles` | 8 | coppie polari motore BLDC — **non usato oggi** |
 | `nPower` | 50 W | potenza nominale |
 | `nRPM` | 3000 | velocità nominale |
+| `phaseResistance` | 1.38 Ω | resistenza di fase **provvisoria**, da identificare ([§8](#8-dallaccelerazione-comandata-al-motore)) |
 | `maxTorque`, `maxCurrent` | *(vuoti)* | da identificare/dichiarare |
 | `mode` | 0 | selettore delle formule di $k_t, k_V$ (vedi [§8](#8-dallaccelerazione-comandata-al-motore)) |
 
@@ -65,8 +66,8 @@ La misura degli angoli è affidata a **due encoder magnetici AS5600** (12 bit as
 
 Stato attuale della catena:
 
-- **oggi** il codice gira su host PC e `main.cpp` sostituisce i sensori con un *mock* (`getAngles(t)`: $\theta = 0.3\sin(0.5t)$, $\alpha = 0.8\sin(2t)$);
-- **previsto** il porting su board con driver [SimpleFOC](https://simplefoc.com/) per il motore e driver I2C per gli AS5600 (il commento in `math_utils.hpp` cita già la velocità stimata da SimpleFOC).
+- il **firmware board** è `furuta/src/main.ino`: [SimpleFOC](https://simplefoc.com/) pilota il motore e legge l'AS5600 del braccio sul bus `Wire`; il pendolo è letto sull'altro bus `Wire1`, perché i due AS5600 condividono l'indirizzo I2C `0x36`. La velocità del braccio arriva da `motor.shaft_velocity`, quella del pendolo da uno stimatore AlphaBeta con $\Delta t$ misurato;
+- **`main.cpp`** è invece uno *smoke test* host: ricalcola $\mathrm{errE} \to \ddot\theta_{cmd} \to \tau$ e l'inversa del modello, senza filtri né loop di controllo. La funzione mock `getAngles(t)` è rimasta nel file ma non è più usata.
 
 ---
 
@@ -96,7 +97,8 @@ Il codice è internamente coerente con questa scelta: l'energia implementata in 
 | $\hat J_2$ | `ArmParameters::J_yy` | $\hat J_2 = J_{2zz} + m_2l_2^2$ | inerzia del pendolo rispetto alla **cerniera** (già comprensiva del trasporto) |
 | $J_{2xx}$ | `ArmParameters::J_xx` | $J_{2xx}$ | componente trasversale del tensore d'inerzia del pendolo — **non usata oggi** |
 | $\hat J_0$ | calcolata in `FurutaDynamics` da `pinwheelInertia` + termini di trasporto | $\hat J_0 = J_1 + m_1l_1^2 + m_2L_1^2$ | inerzia totale vista dal motore con pendolo in basso |
-| $b_1, b_2$ | *(assenti)* | $b_1, b_2$ | attriti viscosi (motore e cerniera) — **non identificati** |
+| $b_1, b_2$ | `FrictionParameters::armViscous`, `pendulumViscous` | $b_1, b_2$ | attriti viscosi (motore e cerniera) — struct presente, valori **non identificati** (default 0) |
+| $R$ | `ActuatorLimits::phaseResistance` | — | resistenza di fase, **provvisoria** (1.38 Ω): entra in $V = Ri + k_e\dot\theta$ ([§8](#8-dallaccelerazione-comandata-al-motore)) |
 | $\mu$ | `mu` | — | costante dichiarata ma **mai usata**; semantica da chiarire (candidato: attrito) |
 | $g$ | `gravity` | $g$ | accelerazione di gravità |
 
@@ -128,6 +130,7 @@ $$\dot\theta_{max} = 2\pi\frac{3850}{60} \approx 403\ \mathrm{rad/s}$$
 
 - $\hat J_2$ è il valore CAD (trasporto alla cerniera incluso): è circa il doppio della stima di un'asta uniforme ($m_2L_2^2/3 \approx 5.25\times10^{-5}\ \mathrm{kg\,m^2}$), coerente con la massa concentrata verso la punta ($l_2/L_2 \approx 0.78$);
 - `J_xx` è il momento rispetto all'asse longitudinale del pendolo ($\approx 0$ per un pendolo snello) e non entra né nel modello semplificato né nel codice attuale;
+- $b_1, b_2$ hanno una struct (`FrictionParameters`) ma restano a 0, e `phaseResistance` è un valore di partenza da identificare;
 - `mu` è dichiarata ma non compare in nessuna formula;
 - $\hat J_0$ usa $J_{1zz}$ dal CAD **rispetto al CoM** ($8.3141\times10^{-5}\,\mathrm{kg\,m^2}$): l'Izz all'origine del CAD ($8.7901\times10^{-5}$) include già $m_1l_1^2$, quindi va usato il valore al CoM per non contare due volte il trasporto.
 
@@ -266,11 +269,7 @@ Errore di troncamento locale $O(h^5)$, errore globale $O(h^4)$. La regione di st
 // Una valutazione di xdot = f(x, tau).
 State stateDerivative(const State& x, double tau) {
     // q = [theta, alpha], qd = [thetaDot, alphaDot]
-    const Mat2 M   = massMatrix(q);                      // §4.4
-    const Vec2 h   = coriolisCentrifugal(q, qd);          // §4.4
-    const Vec2 G   = gravity(q);                          // §4.4
-    const Vec2 tauVec{tau, 0.0};                          // cerniera passiva
-    const Vec2 qdd = solve2x2(M, tauVec - h - G);
+    const Vec2 qdd = solveAcceleration(q[1], qd[0], qd[1], tau);  // §4.4
     return { qd[0], qd[1], qdd[0], qdd[1] };
 }
 
@@ -301,13 +300,15 @@ Con $h = 1$ ms il transitorio più veloce è campionato con ampio margine. Note 
 
 ## 6. Stima della velocità dagli AS5600
 
-Il codice (`velocity_filters.hpp`) stima $\dot\theta$ e $\dot\alpha$ da due letture **quantizzate**: $1\ \mathrm{LSB} = 2\pi/4096\ \mathrm{rad}$ e derivata numerica grezza amplificano il rumore di $1/\Delta t$. Sono disponibili tre stimatori, selezionabili con l'enum `VelocityFilterMode`; un'istanza per sensore (una per il braccio, una per il pendolo).
+Il codice (`velocity_filters.hpp`) stima $\dot\theta$ e $\dot\alpha$ da due letture **quantizzate**: $1\ \mathrm{LSB} = 2\pi/4096\ \mathrm{rad}$ e derivata numerica grezza amplificano il rumore di $1/\Delta t$. Sono disponibili tre stimatori, selezionabili con l'enum `VelocityFilterMode`; un'istanza per sensore (una per il braccio, una per il pendolo). L'API espone sia `update(angle)`, che usa la frequenza nominale passata al costruttore, sia `update(angle, dt)`: lo sketch misura il periodo reale fra due letture, così il filtro regge anche quando il loop non è periodico.
 
 ### 6.1 Wrapping
 
 L'AS5600 è assoluto su un solo giro: agli estremi la lettura salta da $\approx 2\pi$ a $0$. Il salto viene riportato in $(-\pi,\pi]$ prima di ogni aggiornamento:
 
 $$\Delta\theta_{w} = \operatorname{wrap}_{\pi}(\theta_k - \theta_{k-1})$$
+
+Nei filtri predittivi l'innovazione è ridotta con `std::remainder(Δ, 2π)`: l'angolo predetto può accumulare più giri e una singola correzione di $2\pi$ non basterebbe dopo rotazioni consecutive (difetto osservato sul banco e corretto).
 
 ### 6.2 Low-pass sulla derivata grezza (`LowPass`)
 
@@ -342,9 +343,9 @@ Tutti gli stimatori espongono `reset(angle_rad)` per agganciare lo stato senza s
 
 Implementata in `energy_swing_up.hpp`:
 
-$$E = \tfrac12 \hat J_2\,\dot\alpha^2 + m_2gl_2\left(1-\cos\alpha\right), \qquad E^\star = 2m_2gl_2, \qquad \mathrm{errE} = E^\star - E$$
+$$E = \tfrac12 \hat J_2\,\dot\alpha^2 + m_2gl_2\left(1-\cos\alpha\right), \qquad E^\star = 2m_2gl_2, \qquad E_{target} = f\,E^\star, \qquad \mathrm{errE} = E_{target} - E$$
 
-$E$ è zero con il pendolo fermo in basso e vale $E^\star$ con il pendolo fermo in alto. L'obiettivo dello swing-up è portare $\mathrm{errE} \to 0$ pompando energia attraverso il braccio.
+$E$ è zero con il pendolo fermo in basso e vale $E^\star$ con il pendolo fermo in alto. L'obiettivo dello swing-up è portare $\mathrm{errE} \to 0$ pompando energia attraverso il braccio. Il fattore $f$ è `EnergySwingUpConfig::targetEnergyFraction` (default 1.0; lo sketch usa **0.95**): tenerlo sotto 1 pone il target sotto la verticale ed evita di attraversare la separatrice con la sola legge energetica, ma non sostituisce un controllore di equilibrio.
 
 ### 7.2 Perché funziona: l'accoppiamento energia ↔ accelerazione del motore
 
@@ -366,7 +367,7 @@ si ottiene
 
 $$\dot E = +m_2L_1l_2\,k\,\mathrm{errE}\,\dot\alpha^2\cos^2\alpha + \tfrac12\hat J_2\dot\theta^2\sin(2\alpha)\,\dot\alpha$$
 
-Il primo termine è $\ge 0$ finché $E < E^\star$ (cioè $\mathrm{errE} > 0$): l'energia del pendolo cresce e si annulla esattamente a $E = E^\star$. Il segno negativo è fisico: con $\alpha$ misurato dal basso il termine di accoppiamento nella seconda equazione è $+m_2L_1l_2\cos\alpha\,\ddot\theta$, quindi il pompaggio $\dot E \propto -m_2L_1l_2\cos\alpha\,\ddot\theta\,\dot\alpha$ richiede $\ddot\theta$ **opposta** a $\dot\alpha\cos\alpha$ (la forma con $\mathrm{errE}$ ha perciò segno opposto a quella con $E - E^\star$: in simulazione la legge col segno positivo drena energia e porta il pendolo a riposo).
+Il primo termine è $\ge 0$ finché $E < E_{target}$ (cioè $\mathrm{errE} > 0$): l'energia del pendolo cresce e si annulla esattamente a $E = E_{target}$. Il segno negativo è fisico: con $\alpha$ misurato dal basso il termine di accoppiamento nella seconda equazione è $+m_2L_1l_2\cos\alpha\,\ddot\theta$, quindi il pompaggio $\dot E \propto -m_2L_1l_2\cos\alpha\,\ddot\theta\,\dot\alpha$ richiede $\ddot\theta$ **opposta** a $\dot\alpha\cos\alpha$ (la forma con $\mathrm{errE}$ ha perciò segno opposto a quella con $E - E^\star$: in simulazione la legge col segno positivo drena energia e porta il pendolo a riposo).
 
 Caveat noti:
 
@@ -381,13 +382,23 @@ $$\ddot\theta_{cmd} = \operatorname{clamp}\!\left(-k\,\mathrm{errE}\,\dot\alpha\
 
 con $\ddot\theta_{max}$ configurabile e, in prospettiva, derivato da coppia e inerzia come discusso in [§8](#8-dallaccelerazione-comandata-al-motore). Va ricordato che `maxRPM` limita $\dot\theta$ ($\approx 403\ \mathrm{rad/s}$), **non** $\ddot\theta$.
 
-**Stato:** in `energy_swing_up.hpp` sono implementate $E$, $E^\star$, $\mathrm{errE}$ e la legge di controllo con saturazione (`EnergySwingUpController::compute` → `controlOutput::armAcceleration`); $k$ e $\ddot\theta_{max}$ vivono in `EnergySwingUpConfig` (default da tarare).
+**Stato:** in `energy_swing_up.hpp` sono implementate $E$, $E_{target}$, $\mathrm{errE}$ e la legge di controllo con saturazione (`EnergySwingUpController::compute` → `controlOutput::armAcceleration`); $k$, $\ddot\theta_{max}$ e $f$ vivono in `EnergySwingUpConfig` (default da tarare: $k=500$, $\ddot\theta_{max}=100$, $f=1$). Lo sketch usa $k=500$, $\ddot\theta_{max}=20\ \mathrm{rad/s^2}$ e $f=0.95$.
+
+### 7.4 Richiamo al centro e riferimento di velocità
+
+In `main.ino` l'uscita della legge energetica non va direttamente alla coppia: `SwingSequence` la corregge con un richiamo al centro e la integra in un riferimento di velocità per l'anello interno, poi ne usa la derivata effettiva come accelerazione di feed-forward:
+
+$$\ddot\theta_{ctrl} = \operatorname{clamp}\!\left(\ddot\theta_{cmd} - 1.0\,\theta - 0.5\,v_{target},\ -\ddot\theta_{max},\ +\ddot\theta_{max}\right)$$
+
+$$v_{target} \leftarrow \operatorname{clamp}\!\left(v_{target} + \ddot\theta_{ctrl}\,\Delta t,\ -v_{max},\ +v_{max}\right), \qquad \ddot\theta_{ff} = \frac{v_{target} - v_{target}^{prev}}{\Delta t}$$
+
+con $v_{max}=5$ rad/s (`SwingSequence::maxVelocity`). Il richiamo al centro rimuove la componente continua che si accumulerebbe integrando solo l'accelerazione energetica; il riferimento di velocità rende il comando compatibile con l'anello PI di SimpleFOC ([§8](#8-dallaccelerazione-comandata-al-motore)) e nell'inversa del modello entra $\ddot\theta_{ff}$, non $\ddot\theta_{ctrl}$.
 
 ---
 
 ## 8. Dall'accelerazione comandata al motore
 
-La legge di swing-up produce un comando in **accelerazione angolare**. Il passaggio a tensione è lasciato esplicitamente aperto; le due vie candidate sono:
+La legge di swing-up produce un comando in **accelerazione angolare**. Il percorso A è quello implementato nel firmware; il percorso B resta come alternativa più grezza:
 
 **Percorso A — torque path (preferito).** Sfrutta le grandezze già presenti:
 
@@ -395,7 +406,9 @@ La legge di swing-up produce un comando in **accelerazione angolare**. Il passag
 2. corrente: $i = \tau_1 / k_t$;
 3. tensione: $V = R\,i + k_e\,\dot\theta$ con $k_e = k_t$ in unità SI.
 
-Manca la **resistenza $R$** in `parameters.hpp`: senza di essa il percorso non è chiudibile in unità coerenti, ma è quello fisicamente coerente con `ActuatorLimits` e con un driver SimpleFOC in controllo di corrente.
+La **resistenza $R$** è `ActuatorLimits::phaseResistance` (`parameters.hpp`, valore provvisorio da identificare): la conversione è implementata in `Motor::currentForTorque` e `Motor::voltageForCurrent` (`motor.hpp`). Restano da identificare $i_{max}$ e $\tau_{max}$ (`maxCurrent`/`maxTorque` oggi vuoti), quindi la saturazione resta al chiamante.
+
+Nel firmware il percorso è feed-forward + retroazione: `motor.feed_forward_voltage.q` riceve $V$ del modello (limitata a ±1 V) e il PI di velocità di SimpleFOC, che insegue il riferimento $v_{target}$ di [§7.4](#74-richiamo-al-centro-e-riferimento-di-velocità), aggiunge il suo contributo (anch'esso ±1 V). La somma resta entro `SWING_VOLTAGE_LIMIT` = 2 V: un limite di tensione, non una misura di corrente. Il feed-forward compensa il modello, il PI corregge l'attrito statico osservato sul banco.
 
 **Percorso B — voltage path (alternativa).** Tensione proporzionale al comando, saturata a 24 V, con compensazione della back-EMF tramite $k_V$:
 
@@ -412,7 +425,7 @@ La classe `Motor` (`motor.hpp`) deriva $k_t$ e $k_V$ con due modalità seleziona
 | `mode == 0` (default) | $\left(\dfrac{P_{nom}}{n_{RPM}\cdot RTRPS}\right)\dfrac{1}{3.30}$ | $1/(k_t\cdot RTRPS)$ |
 | `mode == 1` | $1/(k_V\cdot RTRPS)$ | $RPM_{max}/V_{dc}$ |
 
-Con i valori attuali si ottiene $k_t \approx 0.048$ (mode 0) oppure $k_t \approx 0.060$, $k_V \approx 160\ \mathrm{RPM/V}$ (mode 1). **Da rivedere**: la costante $3.30$, la coerenza dimensionale tra le due modalità e l'uso di `poles` sono da documentare/verificare; `maxTorque` e `maxCurrent` sono vuoti, quindi oggi non esiste un limite di coppia esplicito.
+Con i valori attuali si ottiene $k_t \approx 0.048$ (mode 0) oppure $k_t \approx 0.060$, $k_V \approx 160\ \mathrm{RPM/V}$ (mode 1). `Motor::currentForTorque(tau)` e `Motor::voltageForCurrent(i, thetaDot)` implementano la conversione del percorso A; non saturano, perché $i_{max}$ e $\tau_{max}$ non sono identificati. **Da rivedere**: la costante $3.30$, la coerenza dimensionale tra le due modalità e l'uso di `poles` sono da documentare/verificare; `maxTorque` e `maxCurrent` sono vuoti, quindi oggi non esiste un limite di coppia esplicito.
 
 ---
 
@@ -423,50 +436,57 @@ Con i valori attuali si ottiene $k_t \approx 0.048$ (mode 0) oppure $k_t \approx
 ```
 pendulum/
 ├── furuta/
-│   ├── CMakeLists.txt              # C++17, target "furuta"
+│   ├── CMakeLists.txt              # C++17, target "furuta" (solo host; Eigen)
 │   ├── include/furuta/
-│   │   ├── parameters.hpp          # geometria, inerzie, limiti attuatore
+│   │   ├── parameters.hpp          # geometria, inerzie, limiti attuatore, attriti
 │   │   ├── sensor_data.hpp         # SensorData: theta, alpha + velocità filtrate
 │   │   ├── velocity_filters.hpp    # AS5600VelocityEstimator (LowPass/Kalman/AlphaBeta)
 │   │   ├── math_utils.hpp          # rpm→rad/s, clamp, homing, referenceAngle
 │   │   ├── dynamics.hpp            # M, h, G (Eigen); dinamica diretta e inversa
-│   │   ├── energy_swing_up.hpp     # E, E*, errE + legge di swing-up saturata
-│   │   └── motor.hpp               # stima di kt e kV
-│   ├── src/main.cpp                # smoke test su host con sensori simulati
+│   │   ├── energy_swing_up.hpp     # E, E_target, errE + legge di swing-up saturata
+│   │   ├── swing_sequence.hpp      # macchina a stati homing→attesa→swing→rientro
+│   │   └── motor.hpp               # stima di kt e kV; tau→i→V
+│   ├── src/
+│   │   ├── main.cpp                # smoke test host della catena errE→θ̈→τ
+│   │   └── main.ino                # firmware board (SimpleFOC + due AS5600)
 │   ├── data/
 │   │   ├── data_extraction.py      # logger seriale → CSV
-│   │   └── data.csv                # log (attualmente vuoto)
-│   └── tests/                      # vuoto
+│   │   └── data.csv                # log del banco del 29/09 (avvio FOC + HOMING/SETTLING)
+│   └── tests/                      # vuoto nel repo: i test host vivono fuori (progetto Arduino)
 └── README.md
 ```
 
-### 9.2 Flusso dati previsto
+### 9.2 Flusso dati
 
 ```mermaid
 flowchart LR
-    subgraph SENSORI["Sensori (da collegare sulla board)"]
-        A1["AS5600 braccio"] -.->|I2C| SD
-        A2["AS5600 pendolo"] -.->|I2C| SD
+    subgraph SENSORI["Sensori sulla board"]
+        A1["AS5600 braccio"] -->|Wire| SF
+        A2["AS5600 pendolo"] -->|Wire1| EST
     end
-    SD["SensorData<br/>theta, alpha"]
-    SD --> EST["AS5600VelocityEstimator x2<br/>thetaDotFiltered, alphaDotFiltered"]
-    EST --> CTRL["EnergySwingUpController<br/>E, E*, errE"]
+    SF["SimpleFOC<br/>loopFOC + shaft_velocity"]
+    EST["AS5600VelocityEstimator<br/>AlphaBeta, dt misurato"]
+    SF --> SD["SensorData<br/>theta, thetaDot"]
+    EST --> SD
+    SD --> CTRL["EnergySwingUpController<br/>E, E_target, errE"]
     CTRL --> LAW["Legge swing-up + saturazione"]
-    LAW --> MAP["Mappatura theta_ddot → tau → V"]
-    MAP --> MOT["Motor: kt, kV"]
-    MOT --> SF["SimpleFOC"] -.-> BLDC["Motore BLDC"]
-    EST -.-> LOG["log seriale"]
+    LAW --> SEQ["SwingSequence<br/>centro + riferimento velocità"]
+    SEQ --> MAP["Mappatura theta_ddot → tau → V"]
+    MAP --> FF["Feed-forward modello<br/>±1 V"]
+    SEQ --> PI["PI velocità SimpleFOC<br/>±1 V"]
+    FF --> SF
+    PI --> SF
+    SF --> MOT["Motore BLDC"]
+    SD -.-> LOG["log seriale a blocchi"]
     LOG -.-> CSV["data_extraction.py → data.csv"]
 
     classDef impl fill:#d4f7d4,stroke:#2e7d32;
-    classDef todo fill:#fff3cd,stroke:#b8860b,stroke-dasharray: 4 3;
-    class SD,EST,CTRL,LAW impl;
-    class MAP,MOT,SF,BLDC,A1,A2,LOG,CSV todo;
+    class A1,A2,SF,EST,SD,CTRL,LAW,SEQ,MAP,FF,PI,MOT,LOG,CSV impl;
 ```
 
-In verde ciò che è implementato, in giallo tratteggiato ciò che è da implementare/collegare. `main.cpp` oggi è un **smoke test**: genera angoli simulati e stampa `mode`, `kt`, `kV` dopo un `setMode(1)`; i filtri e il controllore non sono ancora cablati nel loop.
+Tutta la catena è implementata e gira in `main.ino` (nominale 1 kHz, $\Delta t$ misurato); `main.cpp` resta uno **smoke test host**: usa angoli di prova, ricalcola $\mathrm{errE} \to \ddot\theta_{cmd} \to \tau$ e verifica che il modello risolto con quella coppia riproduca $\ddot\theta_{cmd}$. La sequenza di avvio, l'attesa della spinta e il rientro dal limite sono descritti in [§9.3](#93-homing-quiescenza-e-sequenza-di-avvio).
 
-### 9.3 Utilità di homing e quiescenza
+### 9.3 Homing, quiescenza e sequenza di avvio
 
 In `math_utils.hpp`:
 
@@ -474,9 +494,18 @@ In `math_utils.hpp`:
 - `referenceAngle(rawAngle, offset)`: riporta l'angolo nel range $[-2\pi, 2\pi]$;
 - `homeTarget(sensorDirection, offset)`: tiene conto del verso di montaggio del sensore.
 
+La sequenza che usa queste utilità è `SwingSequence` (`swing_sequence.hpp`), inclusa da `main.ino`:
+
+- `HOMING` → `SETTLING`: quiete sul riferimento per 0.2 s, poi pendolo fermo vicino al basso per 1 s continuo (entro 5°, sotto 0.15 rad/s);
+- `WAITING` (`WAIT_PUSH` nel log): memorizza l'angolo di riposo e attende una spinta di almeno 10° per 20 ms (una perturbazione da 0.02 rad non deve avviare il pompaggio);
+- `SWING`: legge energetica di [§7](#7-controllo-di-swing-up-a-energia) con richiamo al centro e riferimento di velocità;
+- `RETURNING`: sospende lo swing e riporta il braccio allo zero quando $|\theta| \ge 2\pi - 0.5$, oppure quando la frenata stimata a 5 rad/s² lo porterebbe oltre il limite nella fascia esterna ($|\theta| \ge 2\pi - 5$). La riserva è una stima, non un finecorsa fisico.
+
+In `SETTLING` e `WAITING` il driver è disabilitato: il log del banco mostra che il hold a centro con il PI di velocità va in *stick-slip* (l'integrale carica contro l'attrito statico, poi slitta e la spinta eccita il pendolo), quindi in attesa il braccio resta libero e il pendolo si smorza da solo.
+
 ### 9.4 Acquisizione dati
 
-`data/data_extraction.py` legge da `/dev/ttyACM0` a 115200 baud, antepone un timestamp ISO e appende le righe (split su virgola) a `data/data.csv`. Nota: nel codice `f.flush` è scritto senza parentesi (non esegue il flush); i dati restano comunque corretti perché il file viene chiuso alla fine. Il file CSV attuale è vuoto: la pipeline non è ancora stata usata con dati reali.
+`data/data_extraction.py` legge da `/dev/ttyACM0` a 115200 baud, antepone un timestamp ISO e appende le righe (split su virgola) a `data/data.csv`. Nota: nel codice `f.flush` è scritto senza parentesi (non esegue il flush); i dati restano comunque corretti perché il file viene chiuso alla fine. `data.csv` contiene il primo log del banco (29/09: messaggi di avvio SimpleFOC e le fasi `HOMING`/`SETTLING`); la diagnostica è trasmessa in blocchi, solo quando la seriale ha spazio, per non bloccare FOC e controllo.
 
 ---
 
@@ -485,15 +514,15 @@ In `math_utils.hpp`:
 Requisiti: CMake $\ge 3.16$, compilatore C++17, Eigen 3.3+ (`libeigen3-dev`; `CMakeLists.txt` lo cerca con `find_package(Eigen3 3.3 REQUIRED NO_MODULE)`).
 
 ```bash
-cmake -S . -B build
+cmake -S furuta -B build
 cmake --build build
 ./build/furuta
 ```
 
-`main.cpp` stampa i valori di `kt` e `kV` nelle due modalità del motore. Per il logger seriale (richiede `pyserial`, il venv del repository è già presente):
+`main.cpp` stampa i valori di `kt` e `kV` nelle due modalità del motore e uno smoke test della catena $\mathrm{errE} \to \ddot\theta_{cmd} \to \tau$ con verifica dell'inversa. Il firmware board `furuta/src/main.ino` non è compilato da CMake: richiede l'ambiente Arduino con la libreria `furuta` (copia di `furuta/include`), [SimpleFOC](https://simplefoc.com/) e ArduinoEigen. Per il logger seriale (richiede `pyserial`, il venv del repository è già presente):
 
 ```bash
-python data/data_extraction.py
+python furuta/data/data_extraction.py
 ```
 
 Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, percorso assoluto di `data.csv`): vanno adattati alla macchina.
@@ -506,28 +535,32 @@ Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, perc
 
 | Componente | File | Stato | Note |
 |---|---|---|---|
-| Parametri e limiti | `parameters.hpp` | ✅ presente | `mu`, `J_xx`, `poles` non usati; `maxTorque`/`maxCurrent` vuoti |
-| Lettura angoli | `sensor_data.hpp`, `main.cpp` | ⚠️ solo mock host | driver I2C AS5600 da scrivere |
-| Stima velocità | `velocity_filters.hpp` | ✅ implementata | non istanziata in `main.cpp` |
-| Homing / quiete | `math_utils.hpp` | ✅ implementata | non usata |
-| Energia pendolo ($E$, $E^\star$, `errE`) | `energy_swing_up.hpp` | ✅ implementata | — |
-| Legge di swing-up + saturazione | `energy_swing_up.hpp` | ✅ implementata | `compute` → `controlOutput::armAcceleration`; $k$, $\ddot\theta_{max}$ da tarare |
-| Modello dinamico $M, h, G$ | `dynamics.hpp` | ✅ implementata | $\hat J_0$ completata dal CAD; $b_1, b_2$ presenti ma non identificati (default 0) |
+| Parametri e limiti | `parameters.hpp` | ✅ presente | `mu`, `J_xx`, `poles` non usati; `maxTorque`/`maxCurrent` vuoti; `phaseResistance` provvisorio; `FrictionParameters` con $b_1=b_2=0$ |
+| Lettura angoli | `main.ino` | ✅ su board | braccio via SimpleFOC (`Wire`), pendolo via `Wire1` con offset $\pi$; `main.cpp` resta smoke test host |
+| Stima velocità | `velocity_filters.hpp` | ✅ implementata | tre stimatori con `update(angle, dt)`; per il braccio si usa `motor.shaft_velocity` di SimpleFOC |
+| Homing / quiete | `math_utils.hpp` | ✅ implementata | usata da `SwingSequence` |
+| Sequenza di avvio | `swing_sequence.hpp` | ✅ implementata | HOMING→SETTLING→WAIT_PUSH→SWING→RETURN_LIMIT; driver disabilitato in attesa/assestamento |
+| Energia pendolo ($E$, $E_{target}$, `errE`) | `energy_swing_up.hpp` | ✅ implementata | `targetEnergyFraction` (0.95 nello sketch) |
+| Legge di swing-up + saturazione | `energy_swing_up.hpp` | ✅ implementata | `compute` → `controlOutput::armAcceleration`; $k=500$, $\ddot\theta_{max}=20$ rad/s² nello sketch |
+| Richiamo al centro + riferimento di velocità | `swing_sequence.hpp` | ✅ implementata | $\ddot\theta_{ff}$ dall'accelerazione effettiva del riferimento ([§7.4](#74-richiamo-al-centro-e-riferimento-di-velocità)) |
+| Anello interno di velocità | `main.ino` | ✅ implementata | PI SimpleFOC (P=0.2, I=20) + feed-forward modello, ±1 V ciascuno, somma ≤ 2 V |
+| Modello dinamico $M, h, G$ | `dynamics.hpp` | ✅ implementata | $\hat J_0$ completata dal CAD; $b_1, b_2$ non identificati (default 0) |
 | RK4 + `stateDerivative` | — | ❌ da implementare | progetto: $h = 1$ ms, ZOH |
-| Mappatura $\ddot\theta \to \tau \to V$ | `dynamics.hpp` | ⚠️ parziale | $\ddot\theta \to \tau$ esatta (inversa con cerniera passiva); $\tau \to V$ aperta (mancano $R$, $i_{max}$) |
-| Log CSV | `data/data_extraction.py` | ✅ presente | `data.csv` vuoto; flush senza parentesi |
-| Test | `tests/` | ❌ vuoto | — |
-| Firmware board (SimpleFOC + AS5600) | — | ❌ da fare | oggi solo host; `main.ino` rimosso in passato |
+| Mappatura $\ddot\theta \to \tau \to i \to V$ | `dynamics.hpp`, `motor.hpp` | ✅ implementata | $\ddot\theta \to \tau$ esatta (inversa con cerniera passiva); $\tau \to i \to V$ in `Motor` con $R$ provvisorio; $i_{max}$/$\tau_{max}$ da identificare |
+| Log CSV | `data/data_extraction.py` | ✅ presente | `data.csv` con primo log del banco; flush senza parentesi |
+| Test host | `tests/` (repo) | ⚠️ fuori repo | `tests/` vuoto; i test girano nel progetto Arduino `energy_swing_up/tests` (filtri, tempi di swing-up, sequenza) |
+| Firmware board (SimpleFOC + AS5600) | `main.ino` | ✅ presente | eseguito sul banco il 29/09 (HOMING/SETTLING); taratura reale da completare |
+| Controllore di stabilizzazione | — | ❌ da fare | — |
 
 ### 11.2 Roadmap
 
-1. **`dynamics.hpp`**: ✅ $M(q)$, $h(q,\dot q)$, $G(q)$ implementate, $\hat J_0$ completata. Verifica su harness esterno: energia meccanica totale conservata (drift $\sim 10^{-9}$ J su 10 s a $h = 1$ ms) e inversa $\ddot\theta \to \tau$ che riproduce $\ddot\theta$ a precisione di macchina. Manca il commit dei test.
-2. **`integrator.hpp`**: RK4 + `stateDerivative`. Verifica: pendolo libero ($\dot\theta = 0$) con confronto al piccolo angolo e drift di energia $\ll 1\%$ su 10 s con $h = 1$ ms.
-3. **Legge di swing-up + saturazione**: ✅ implementata e verificata in simulazione chiusa con RK4 esterno: da appeso, $\mathrm{errE}$ scende da $2.8\times10^{-2}$ a $\sim 3\times10^{-4}$ J in 5 s ($k = 500$, $\ddot\theta_{max} = 100$ rad/s²). $k$ e $\ddot\theta_{max}$ restano da tarare sul sistema reale.
-4. **Identificazione**: $b_1, b_2$, $R$, $i_{max}$; revisione di $k_t, k_V$ e della costante $3.30$. Poi mappatura a tensione.
-5. **Port su board**: SimpleFOC + due AS5600 su I2C, homing, verifica della frequenza reale del loop rispetto a $h$.
+1. **`dynamics.hpp`**: ✅ $M(q)$, $h(q,\dot q)$, $G(q)$ implementate, $\hat J_0$ completata. Verifica esterna: energia meccanica conservata (drift $\sim 10^{-9}$ J su 10 s a $h = 1$ ms) e inversa $\ddot\theta \to \tau$ a precisione di macchina.
+2. **`integrator.hpp`**: ❌ RK4 + `stateDerivative`. Verifica: pendolo libero ($\dot\theta = 0$) con confronto al piccolo angolo e drift di energia $\ll 1\%$ su 10 s con $h = 1$ ms.
+3. **Legge di swing-up + sequenza**: ✅ implementate e verificate con test host (RK4 esterno). Con spinta, $f=0.95$, $k=500$, PI e richiamo al centro il target si raggiunge in ~4 s in simulazione; $k$, $\ddot\theta_{max}$ e $f$ restano da tarare sul banco (il log del 29/09 si ferma a `SETTLING`).
+4. **Identificazione**: $b_1, b_2$, $R$ (oggi provvisorio in `phaseResistance`), $\tau_{max}$, $i_{max}$; revisione di $k_t, k_V$ e della costante $3.30$.
+5. **Port su board**: ✅ prima esecuzione sul banco (SimpleFOC + due AS5600, homing, `SwingSequence`, diagnostica a blocchi). Restano verifica della frequenza reale del loop rispetto a $h$ (il log riporta `dt max us`) e dei segni/offset; poi lo swing completo.
 6. **Stabilizzazione**: controllore in cima (LQR o PID con scheduling) e logica di commutazione swing-up ↔ stabilize.
-7. **Test e analisi**: riempire `tests/`, pulire il logger e costruire l'analisi dei CSV.
+7. **Test e analisi**: portare i test host dentro `furuta/tests/`, pulire il logger e costruire l'analisi dei CSV.
 
 ---
 
@@ -538,4 +571,4 @@ Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, perc
 - K. J. Åström, K. Furuta, *Swinging up a pendulum by energy control*, Automatica, 36(2):287–295, 2000.
 - J. Á. Acosta, *Furuta's Pendulum: A Conservative Nonlinear Model for Theory and Practise*, Mathematical Problems in Engineering, 2010, Article ID 742894.
 - [Wikipedia — Furuta pendulum](https://en.wikipedia.org/wiki/Furuta_pendulum) (equazioni di Cazzolato & Prime, geometria di riferimento).
-- [SimpleFOC](https://simplefoc.com/) (driver motore previsto) e datasheet AS5600 (encoder magnetico 12 bit).
+- [SimpleFOC](https://simplefoc.com/) (driver motore usato dal firmware) e datasheet AS5600 (encoder magnetico 12 bit).

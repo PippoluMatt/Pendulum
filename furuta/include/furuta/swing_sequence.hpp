@@ -1,9 +1,9 @@
 #ifndef SWING_SEQUENCE_HPP
 #define SWING_SEQUENCE_HPP
 
-namespace furuta {
-
 #include <furuta/math_utils.hpp>
+
+namespace furuta {
 
 // Sequenza del solo sketch, condivisa con i test host.
 class SwingSequence {
@@ -32,7 +32,11 @@ public:
             break;
         case Phase::Settling:
             // L'allineamento e l'homing possono far oscillare il pendolo.
-            quietTime = centered && std::abs(s.alpha) < 5.0 * M_PI / 180.0
+            // Il braccio e' libero (driver disabilitato dallo sketch durante
+            // attesa e assestamento): senza forza di richiamo non si puo'
+            // pretendere |theta| ~ 0. Conta solo la quiete del pendolo; il
+            // richiamo al centro avviene durante lo swing.
+            quietTime = std::abs(s.alpha) < 5.0 * M_PI / 180.0
                 && std::abs(s.alphaDotFiltered) < 0.15 ? quietTime + dt : 0.0;
             if (quietTime >= 1.0) {
                 restAlpha = s.alpha;
@@ -52,10 +56,18 @@ public:
         case Phase::Swing: {
             // Riserva 0.5 rad e una distanza di frenata stimata a 5 rad/s^2.
             // Usa la posizione continua e la velocita' MISURATA, non il target.
+            const double distance = std::abs(s.theta);
             const double outwardSpeed = s.theta * s.thetaDotFiltered > 0.0
                 ? std::abs(s.thetaDotFiltered) : 0.0;
-            if (std::abs(s.theta) + outwardSpeed * outwardSpeed / 10.0
-                    >= armLimit - 0.5) {
+            // Il termine di velocita' vale solo nella fascia esterna (5 rad dal
+            // limite): a theta ~ 0 un picco della stima (quantizzazione x jitter
+            // del loop) predirebbe una frenata inesistente e farebbe scattare
+            // il rientro a vuoto (osservato sul banco: RETURN_LIMIT con
+            // theta ~ -0.1). Nella fascia esterna la predizione resta attiva.
+            if (distance >= armLimit - 0.5
+                    || (distance >= armLimit - 5.0
+                        && distance + outwardSpeed * outwardSpeed / 10.0
+                            >= armLimit - 0.5)) {
                 phase = Phase::Returning;
                 quietTime = 0.0;
                 break;

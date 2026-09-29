@@ -28,6 +28,10 @@ struct ActuatorLimits
     double nPower{50.0};
     double nRPM{3000.0};
 
+    // Resistenza di fase [ohm] per V = R*i + ke*thetaDot (README §8 percorso A).
+    // Valore di partenza provvisorio, DA IDENTIFICARE sul motore reale.
+    double phaseResistance{1.38};
+
     double maxTorque{};
     double maxCurrent{};
     
@@ -50,8 +54,8 @@ struct ArmParameters
 // Non ancora identificati: default a zero, il modello resta completo.
 struct FrictionParameters
 {
-    double armViscous{0.0};       // b1 [N*m*s/rad]
-    double pendulumViscous{0.0};  // b2 [N*m*s/rad]
+    double armViscous{0.0006};       // b1 [N*m*s/rad]
+    double pendulumViscous{0.0006};  // b2 [N*m*s/rad]
 };
 
 } // namespace furuta
