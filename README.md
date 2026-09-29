@@ -95,7 +95,7 @@ Il codice è internamente coerente con questa scelta: l'energia implementata in 
 | $L_2$ | `ArmParameters::pendulumLenght` | $L_2$ | lunghezza del pendolo (refuso `Lenght` nel codice) |
 | $\hat J_2$ | `ArmParameters::J_yy` | $\hat J_2 = J_{2zz} + m_2l_2^2$ | inerzia del pendolo rispetto alla **cerniera** (già comprensiva del trasporto) |
 | $J_{2xx}$ | `ArmParameters::J_xx` | $J_{2xx}$ | componente trasversale del tensore d'inerzia del pendolo — **non usata oggi** |
-| $\hat J_0$ | *(assente)* | $\hat J_0 = J_1 + m_1l_1^2 + m_2L_1^2$ | inerzia totale vista dal motore con pendolo in basso — **da completare: manca $J_1$** |
+| $\hat J_0$ | calcolata in `FurutaDynamics` da `pinwheelInertia` + termini di trasporto | $\hat J_0 = J_1 + m_1l_1^2 + m_2L_1^2$ | inerzia totale vista dal motore con pendolo in basso |
 | $b_1, b_2$ | *(assenti)* | $b_1, b_2$ | attriti viscosi (motore e cerniera) — **non identificati** |
 | $\mu$ | `mu` | — | costante dichiarata ma **mai usata**; semantica da chiarire (candidato: attrito) |
 | $g$ | `gravity` | $g$ | accelerazione di gravità |
@@ -129,7 +129,7 @@ $$\dot\theta_{max} = 2\pi\frac{3850}{60} \approx 403\ \mathrm{rad/s}$$
 - $\hat J_2$ è il valore CAD (trasporto alla cerniera incluso): è circa il doppio della stima di un'asta uniforme ($m_2L_2^2/3 \approx 5.25\times10^{-5}\ \mathrm{kg\,m^2}$), coerente con la massa concentrata verso la punta ($l_2/L_2 \approx 0.78$);
 - `J_xx` è il momento rispetto all'asse longitudinale del pendolo ($\approx 0$ per un pendolo snello) e non entra né nel modello semplificato né nel codice attuale;
 - `mu` è dichiarata ma non compare in nessuna formula;
-- $\hat J_0$ non è calcolabile finché non si dispone di $J_1$ o di una misura complessiva dell'inerzia vista dal motore.
+- $\hat J_0$ usa $J_{1zz}$ dal CAD **rispetto al CoM** ($8.3141\times10^{-5}\,\mathrm{kg\,m^2}$): l'Izz all'origine del CAD ($8.7901\times10^{-5}$) include già $m_1l_1^2$, quindi va usato il valore al CoM per non contare due volte il trasporto.
 
 ---
 
@@ -228,7 +228,7 @@ La decomposizione di $h$ in $C(q,\dot q)\dot q$ **non è unica** (dipende dalla 
 
 $$\ddot q = M(q)^{-1}\left(\tau - h(q,\dot q) - G(q)\right)$$
 
-e l'inversa di una $2\times2$ è banale: $\det M = M_{11}M_{22} - M_{12}^2$. Oggi $h$ e $G$ non sono implementate, e $\hat J_0$ è incompleta: vedi [§11](#11-stato-dellimplementazione-e-roadmap).
+e l'inversa di una $2\times2$ è banale: $\det M = M_{11}M_{22} - M_{12}^2$. Il modello è implementato in `dynamics.hpp`: `massMatrix` e `gravityVector` per $M$ e $G$, `biasForces` per $h = C\dot q + D\dot q$; `solveAcceleration` risolve la dinamica diretta ($\ddot q$ da $\tau$) e `torqueForArmAcceleration` l'inversa a cerniera passiva ($\tau_1$ da $\ddot\theta_{cmd}$): vedi [§11](#11-stato-dellimplementazione-e-roadmap).
 
 ---
 
@@ -360,13 +360,13 @@ $$\dot E = -m_2L_1l_2\cos\alpha\,\ddot\theta\,\dot\alpha + \tfrac12\hat J_2\dot\
 
 Scegliendo la **legge di swing-up**
 
-$$\boxed{\ \ddot\theta_{cmd} = k \cdot \mathrm{errE} \cdot \dot\alpha \cdot \cos\alpha\ }$$
+$$\boxed{\ \ddot\theta_{cmd} = -k \cdot \mathrm{errE} \cdot \dot\alpha \cdot \cos\alpha\ }$$
 
 si ottiene
 
-$$\dot E = -m_2L_1l_2\,k\,\mathrm{errE}\,\dot\alpha^2\cos^2\alpha + \tfrac12\hat J_2\dot\theta^2\sin(2\alpha)\,\dot\alpha$$
+$$\dot E = +m_2L_1l_2\,k\,\mathrm{errE}\,\dot\alpha^2\cos^2\alpha + \tfrac12\hat J_2\dot\theta^2\sin(2\alpha)\,\dot\alpha$$
 
-Il primo termine è $\ge 0$ finché $E < E^\star$ (cioè $\mathrm{errE} > 0$): l'energia del pendolo cresce e si annulla esattamente a $E = E^\star$. Le convenzioni adottate in questo progetto ($\alpha$ misurato dal basso, $\mathrm{errE} = E^\star - E$) **non richiedono cambi di segno** rispetto alla formula classica.
+Il primo termine è $\ge 0$ finché $E < E^\star$ (cioè $\mathrm{errE} > 0$): l'energia del pendolo cresce e si annulla esattamente a $E = E^\star$. Il segno negativo è fisico: con $\alpha$ misurato dal basso il termine di accoppiamento nella seconda equazione è $+m_2L_1l_2\cos\alpha\,\ddot\theta$, quindi il pompaggio $\dot E \propto -m_2L_1l_2\cos\alpha\,\ddot\theta\,\dot\alpha$ richiede $\ddot\theta$ **opposta** a $\dot\alpha\cos\alpha$ (la forma con $\mathrm{errE}$ ha perciò segno opposto a quella con $E - E^\star$: in simulazione la legge col segno positivo drena energia e porta il pendolo a riposo).
 
 Caveat noti:
 
@@ -377,11 +377,11 @@ Caveat noti:
 
 ### 7.3 Saturazione
 
-$$\ddot\theta_{cmd} = \operatorname{clamp}\!\left(k\,\mathrm{errE}\,\dot\alpha\cos\alpha,\ -\ddot\theta_{max},\ +\ddot\theta_{max}\right)$$
+$$\ddot\theta_{cmd} = \operatorname{clamp}\!\left(-k\,\mathrm{errE}\,\dot\alpha\cos\alpha,\ -\ddot\theta_{max},\ +\ddot\theta_{max}\right)$$
 
 con $\ddot\theta_{max}$ configurabile e, in prospettiva, derivato da coppia e inerzia come discusso in [§8](#8-dallaccelerazione-comandata-al-motore). Va ricordato che `maxRPM` limita $\dot\theta$ ($\approx 403\ \mathrm{rad/s}$), **non** $\ddot\theta$.
 
-**Stato:** in `energy_swing_up.hpp` sono implementate $E$, $E^\star$ e $\mathrm{errE}$; la legge di controllo e la saturazione sono da implementare (`controlOutput` oggi è uno stub con il solo campo `velocity`).
+**Stato:** in `energy_swing_up.hpp` sono implementate $E$, $E^\star$, $\mathrm{errE}$ e la legge di controllo con saturazione (`EnergySwingUpController::compute` → `controlOutput::armAcceleration`); $k$ e $\ddot\theta_{max}$ vivono in `EnergySwingUpConfig` (default da tarare).
 
 ---
 
@@ -391,7 +391,7 @@ La legge di swing-up produce un comando in **accelerazione angolare**. Il passag
 
 **Percorso A — torque path (preferito).** Sfrutta le grandezze già presenti:
 
-1. coppia stimata: $\tau_1 \approx M_{11}(\alpha)\,\ddot\theta_{cmd} = (\hat J_0 + \hat J_2\sin^2\alpha)\,\ddot\theta_{cmd}$ (il termine di accoppiamento $M_{12}\ddot\alpha$ è trattato come disturbo/compensazione);
+1. coppia: $\tau_1 = M_{11}\ddot\theta_{cmd} + M_{12}\ddot\alpha + h_1 + G_1$, con $\ddot\alpha = -(M_{21}\ddot\theta_{cmd} + h_2 + G_2)/M_{22}$ imposta dalla cerniera passiva ($\tau_2 = 0$): è l'inversa esatta del modello, implementata in `FurutaDynamics::torqueForArmAcceleration` (non più l'approssimazione $\tau_1 \approx M_{11}\ddot\theta_{cmd}$);
 2. corrente: $i = \tau_1 / k_t$;
 3. tensione: $V = R\,i + k_e\,\dot\theta$ con $k_e = k_t$ in unità SI.
 
@@ -429,7 +429,8 @@ pendulum/
 │   │   ├── sensor_data.hpp         # SensorData: theta, alpha + velocità filtrate
 │   │   ├── velocity_filters.hpp    # AS5600VelocityEstimator (LowPass/Kalman/AlphaBeta)
 │   │   ├── math_utils.hpp          # rpm→rad/s, clamp, homing, referenceAngle
-│   │   ├── energy_swing_up.hpp     # E, E*, errE (legge di controllo: TODO)
+│   │   ├── dynamics.hpp            # M, h, G (Eigen); dinamica diretta e inversa
+│   │   ├── energy_swing_up.hpp     # E, E*, errE + legge di swing-up saturata
 │   │   └── motor.hpp               # stima di kt e kV
 │   ├── src/main.cpp                # smoke test su host con sensori simulati
 │   ├── data/
@@ -459,8 +460,8 @@ flowchart LR
 
     classDef impl fill:#d4f7d4,stroke:#2e7d32;
     classDef todo fill:#fff3cd,stroke:#b8860b,stroke-dasharray: 4 3;
-    class SD,EST,CTRL impl;
-    class LAW,MAP,MOT,SF,BLDC,A1,A2,LOG,CSV todo;
+    class SD,EST,CTRL,LAW impl;
+    class MAP,MOT,SF,BLDC,A1,A2,LOG,CSV todo;
 ```
 
 In verde ciò che è implementato, in giallo tratteggiato ciò che è da implementare/collegare. `main.cpp` oggi è un **smoke test**: genera angoli simulati e stampa `mode`, `kt`, `kV` dopo un `setMode(1)`; i filtri e il controllore non sono ancora cablati nel loop.
@@ -481,7 +482,7 @@ In `math_utils.hpp`:
 
 ## 10. Build ed esecuzione
 
-Requisiti: CMake $\ge 3.16$, compilatore C++17.
+Requisiti: CMake $\ge 3.16$, compilatore C++17, Eigen 3.3+ (`libeigen3-dev`; `CMakeLists.txt` lo cerca con `find_package(Eigen3 3.3 REQUIRED NO_MODULE)`).
 
 ```bash
 cmake -S . -B build
@@ -510,19 +511,19 @@ Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, perc
 | Stima velocità | `velocity_filters.hpp` | ✅ implementata | non istanziata in `main.cpp` |
 | Homing / quiete | `math_utils.hpp` | ✅ implementata | non usata |
 | Energia pendolo ($E$, $E^\star$, `errE`) | `energy_swing_up.hpp` | ✅ implementata | — |
-| Legge di swing-up + saturazione | — | ❌ da implementare | `controlOutput` è uno stub con campo `velocity` |
-| Modello dinamico $M, h, G$ | — | ❌ da implementare | mancano $\hat J_0$ (cioè $J_1$), $b_1, b_2$ |
+| Legge di swing-up + saturazione | `energy_swing_up.hpp` | ✅ implementata | `compute` → `controlOutput::armAcceleration`; $k$, $\ddot\theta_{max}$ da tarare |
+| Modello dinamico $M, h, G$ | `dynamics.hpp` | ✅ implementata | $\hat J_0$ completata dal CAD; $b_1, b_2$ presenti ma non identificati (default 0) |
 | RK4 + `stateDerivative` | — | ❌ da implementare | progetto: $h = 1$ ms, ZOH |
-| Mappatura $\ddot\theta \to \tau \to V$ | — | ❌ aperta | mancano $R$, $i_{max}$, $k_t$ coerenti |
+| Mappatura $\ddot\theta \to \tau \to V$ | `dynamics.hpp` | ⚠️ parziale | $\ddot\theta \to \tau$ esatta (inversa con cerniera passiva); $\tau \to V$ aperta (mancano $R$, $i_{max}$) |
 | Log CSV | `data/data_extraction.py` | ✅ presente | `data.csv` vuoto; flush senza parentesi |
 | Test | `tests/` | ❌ vuoto | — |
 | Firmware board (SimpleFOC + AS5600) | — | ❌ da fare | oggi solo host; `main.ino` rimosso in passato |
 
 ### 11.2 Roadmap
 
-1. **`dynamics.hpp`**: $M(q)$, $h(q,\dot q)$, $G(q)$; completare $\hat J_0$ (misura di $J_1$ o identificazione complessiva). Verifica: energia meccanica costante nel tempo a coppia nulla e attriti nulli.
+1. **`dynamics.hpp`**: ✅ $M(q)$, $h(q,\dot q)$, $G(q)$ implementate, $\hat J_0$ completata. Verifica su harness esterno: energia meccanica totale conservata (drift $\sim 10^{-9}$ J su 10 s a $h = 1$ ms) e inversa $\ddot\theta \to \tau$ che riproduce $\ddot\theta$ a precisione di macchina. Manca il commit dei test.
 2. **`integrator.hpp`**: RK4 + `stateDerivative`. Verifica: pendolo libero ($\dot\theta = 0$) con confronto al piccolo angolo e drift di energia $\ll 1\%$ su 10 s con $h = 1$ ms.
-3. **Legge di swing-up + saturazione** in simulazione chiusa. Verifica: da $\alpha = 0$ a $E \approx E^\star$ entro un tempo prefissato, senza saturare inutilmente.
+3. **Legge di swing-up + saturazione**: ✅ implementata e verificata in simulazione chiusa con RK4 esterno: da appeso, $\mathrm{errE}$ scende da $2.8\times10^{-2}$ a $\sim 3\times10^{-4}$ J in 5 s ($k = 500$, $\ddot\theta_{max} = 100$ rad/s²). $k$ e $\ddot\theta_{max}$ restano da tarare sul sistema reale.
 4. **Identificazione**: $b_1, b_2$, $R$, $i_{max}$; revisione di $k_t, k_V$ e della costante $3.30$. Poi mappatura a tensione.
 5. **Port su board**: SimpleFOC + due AS5600 su I2C, homing, verifica della frequenza reale del loop rispetto a $h$.
 6. **Stabilizzazione**: controllore in cima (LQR o PID con scheduling) e logica di commutazione swing-up ↔ stabilize.

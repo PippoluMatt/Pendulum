@@ -1,3 +1,5 @@
+#include "furuta/dynamics.hpp"
+#include "furuta/energy_swing_up.hpp"
 #include "furuta/motor.hpp"
 #include "furuta/math_utils.hpp"
 
@@ -34,5 +36,32 @@ int main()
     std::cout << "The mode value is: " << motor.mode() << "\n";
     std::cout << "After setMode(1), kt is: " << motor.kt() << "\n";
     std::cout << "The kV value is: " << motor.kV() << "\n";
+
+    // Smoke test del collegamento errE -> thetaDDot_cmd -> tau: la legge di
+    // swing-up genera l'accelerazione dell'asse, il modello dinamico la
+    // traduce in coppia rispettando la cerniera passiva.
+    furuta::PinwheelParameters pinwheel{};
+    furuta::ArmParameters arm{};
+    furuta::FrictionParameters friction{};
+    furuta::FurutaDynamics dynamics{pinwheel, arm, friction};
+    furuta::EnergySwingUpController swingUp{arm};
+
+    furuta::SensorData sensor{};
+    sensor.alpha = M_PI / 3.0;
+    sensor.alphaDotFiltered = 1.0;
+
+    const furuta::controlOutput command = swingUp.compute(sensor);
+    const double tau = dynamics.torqueForArmAcceleration(
+        sensor.alpha, sensor.thetaDotFiltered, sensor.alphaDotFiltered,
+        command.armAcceleration);
+
+    std::cout << "Energy error: " << swingUp.energyError(sensor) << " J\n";
+    std::cout << "thetaDDot_cmd: " << command.armAcceleration << " rad/s^2\n";
+    std::cout << "tau_cmd: " << tau << " N*m\n";
+
+    // Il modello risolto con tau_cmd deve riprodurre thetaDDot_cmd.
+    const furuta::Vec2 qdd = dynamics.solveAcceleration(
+        sensor.alpha, sensor.thetaDotFiltered, sensor.alphaDotFiltered, tau);
+    std::cout << "thetaDDot from model: " << qdd.x() << " rad/s^2\n";
     return 0;
 }

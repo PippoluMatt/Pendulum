@@ -13,6 +13,11 @@ struct PinwheelParameters
     const double pinwheelMass{0.096567};      // m1, massa J1
     const double pinwheelToCoM{0.0070202};    // l1, asse motore -> CoM braccio
     const double pendulumToCenter{0.079073};  // L1, asse motore -> cerniera pendolo
+
+    // J1zz, inerzia del braccio rispetto al CoM (asse verticale, dal CAD).
+    // L'Izz all'origine del CAD (8.7901e-5) include gia' m1*l1^2: si usa il
+    // valore al CoM per non contare due volte il termine di trasporto in J0.
+    const double pinwheelInertia{8.3141106E-05};
 };
 
 struct ActuatorLimits
@@ -41,11 +46,13 @@ struct ArmParameters
     const double J_yy {1.0513E-4};  // hat J2: asse cerniera (J2zz + trasporto m2*l2^2)
 };
 
-struct  ControlOutput
+// Attriti viscosi (README §4.3): b1 sull'asse del motore, b2 sulla cerniera.
+// Non ancora identificati: default a zero, il modello resta completo.
+struct FrictionParameters
 {
-    ;
+    double armViscous{0.0};       // b1 [N*m*s/rad]
+    double pendulumViscous{0.0};  // b2 [N*m*s/rad]
 };
-
 
 } // namespace furuta
 #endif

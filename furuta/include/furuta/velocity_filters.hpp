@@ -45,8 +45,8 @@ namespace furuta
             : mode_{mode}, invDt_{fs_hz}, dt_{1.0f / fs_hz},
               alpha_{alpha}, beta_{beta}
         {
-            const float rc = 1.0f / (2.0f * static_cast<float>(M_PI) * fc_hz);
-            betaLp_ = dt_ / (rc + dt_);
+            rc_ = 1.0f / (2.0f * static_cast<float>(M_PI) * fc_hz);
+            betaLp_ = dt_ / (rc_ + dt_);
 
             // Rumore di quantizzazione: varianza uniforme su 1 LSB.
             constexpr float lsb = 2.0f * static_cast<float>(M_PI) / 4096.0f;
@@ -96,13 +96,22 @@ namespace furuta
             return 0.0f;
         }
 
+        // Per loop non periodici: intervallo reale fra due letture, in secondi
+        // (strettamente positivo). Senza questo dato fs_hz resta un'ipotesi.
+        float update(double angle_rad, float dt_seconds) noexcept
+        {
+            dt_ = dt_seconds;
+            invDt_ = 1.0f / dt_;
+            betaLp_ = dt_ / (rc_ + dt_);
+            return update(angle_rad);
+        }
+
     private:
-        // AS5600 assoluto su un giro: riporta il salto in (-pi, pi].
+        // L'angolo predetto puo' accumulare piu' giri: una sola correzione di
+        // 2*pi non basta. L'innovazione deve restare in [-pi, pi].
         static double wrapPi(double delta) noexcept
         {
-            if (delta > M_PI)       delta -= 2.0 * M_PI;
-            else if (delta < -M_PI) delta += 2.0 * M_PI;
-            return delta;
+            return std::remainder(delta, 2.0 * M_PI);
         }
 
         float updateLowPass(double angle_rad) noexcept
@@ -158,10 +167,11 @@ namespace furuta
         }
 
         VelocityFilterMode mode_;
-        const float invDt_;
-        const float dt_;
+        float invDt_;
+        float dt_;
 
         // LowPass
+        float rc_{0.0f};
         float betaLp_{0.0f};
         float velocity_{0.0f};
 
