@@ -1,0 +1,65 @@
+J1:
+Physical
+	Mass	0.096567 kg
+	Volume	8.7633971E-05 m^3
+	Density	1000 kg / m^3
+	Area	0.05189368 m^2
+	World X,Y,Z	0.00 m, 0.00 m, 0.14950 m
+	Center of Mass	-0.001272 m, 0.006904 m, 0.16958 m
+	Bounding Box
+		Length	0.081356 m
+		Width	0.119198 m
+		Height	0.069043 m
+	Moment of Inertia at Center of Mass   (kg m^2)
+		Ixx	8.8620348E-05
+		Ixy	2.247413E-06
+		Ixz	4.02745E-07
+		Iyx	2.247413E-06
+		Iyy	7.6384939E-05
+		Iyz	-2.466575E-06
+		Izx	4.02745E-07
+		Izy	-2.466575E-06
+		Izz	8.3141106E-05
+	Moment of Inertia at Origin   (kg m^2)
+		Ixx	2.870E-03
+		Ixy	3.095629E-06
+		Ixz	2.1236571E-05
+		Iyx	3.095629E-06
+		Iyy	2.854E-03
+		Iyz	-1.155E-04
+		Izx	2.1236571E-05
+		Izy	-1.155E-04
+		Izz	8.7900528E-05
+
+J2:
+Physical
+	Mass	0.021332 kg
+	Volume	7.363039E-06 m^3
+	Density	3000 kg / m^3
+	Area	0.006546389 m^2
+	World X,Y,Z	-0.014094 m, 0.077807 m, 0.175522 m
+	Center of Mass	-0.014328 m, 0.079099 m, 0.108924 m
+	Bounding Box
+		Length	0.03236 m
+		Width	0.011572 m
+		Height	0.09790 m
+	Moment of Inertia at Center of Mass   (kg m^2)
+		Ixx	9.617575E-06
+		Ixy	-1.63287E-07
+		Ixz	1.8447E-08
+		Iyx	-1.63287E-07
+		Iyy	1.0489408E-05
+		Iyz	-1.01834E-07
+		Izx	1.8447E-08
+		Izy	-1.01834E-07
+		Izz	9.84777E-07
+	Moment of Inertia at Origin   (kg m^2)
+		Ixx	3.962E-04
+		Ixy	2.4013168E-05
+		Ixz	3.3310856E-05
+		Iyx	2.4013168E-05
+		Iyy	2.680E-04
+		Iyz	-1.839E-04
+		Izx	3.3310856E-05
+		Izy	-1.839E-04
+		Izz	1.388E-04

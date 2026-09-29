@@ -7,11 +7,12 @@ inline constexpr double gravity{9.81};
 inline constexpr double mu{0.00125};
 
 // Dati puri: nessuna logica, trivially copyable (48 byte).
+// Geometria dal CAD (dimensions.txt): J1 = braccio.
 struct PinwheelParameters
 {   
-    const double pinwheelMass{0.09657};       // m1
-    const double pinwheelToCoM{0.00702};       // l1
-    const double pendulumToCenter{0.07782};   // L1  
+    const double pinwheelMass{0.096567};      // m1, massa J1
+    const double pinwheelToCoM{0.0070202};    // l1, asse motore -> CoM braccio
+    const double pendulumToCenter{0.079073};  // L1, asse motore -> cerniera pendolo
 };
 
 struct ActuatorLimits
@@ -28,16 +29,16 @@ struct ActuatorLimits
     int mode{0};
 };
 
+// Geometria dal CAD (dimensions.txt): J2 = pendolo, origine componente = cerniera.
 struct ArmParameters
 {
-    // dimensions come from https://en.wikipedia.org/wiki/Furuta_pendulum
-    const double pendulumMass{0.0210};       // m2
-    const double pendulumToCoM{0.04635};      // l2
-    const double pendulumLenght{0.0944};      // L2
+    const double pendulumMass{0.021332};      // m2, massa J2
+    const double pendulumToCoM{0.066611};     // l2, cerniera -> CoM
+    const double pendulumLenght{0.0859};      // L2, cerniera -> punta (12 mm di accoppiamento sopra l'asse)
     
     const double pendulumEnPot{pendulumMass * gravity * pendulumToCoM};
-    const double J_xx {3.962E-4};
-    const double J_yy {2.68E-4};
+    const double J_xx {9.9256E-7};  // J2xx: asse longitudinale del pendolo (frame CoM)
+    const double J_yy {1.0513E-4};  // hat J2: asse cerniera (J2zz + trasporto m2*l2^2)
 };
 
 struct  ControlOutput

@@ -102,28 +102,32 @@ Il codice è internamente coerente con questa scelta: l'energia implementata in 
 
 ### 3.3 Parametri numerici
 
+Geometria e inerzie provengono dal CAD (`dimensions.txt`: J1 = braccio, J2 = pendolo, origine di J2 sulla cerniera).
+
 | Parametro | Valore | Unità |
 |---|---|---|
-| $m_1$ | 0.09657 | kg |
-| $l_1$ | 0.00702 | m |
-| $L_1$ | 0.07782 | m |
-| $m_2$ | 0.0210 | kg |
-| $l_2$ | 0.04635 | m |
-| $L_2$ | 0.0944 | m |
-| $\hat J_2$ (`J_yy`) | $2.68\times10^{-4}$ | kg·m² |
-| $J_{2xx}$ (`J_xx`) | $3.962\times10^{-4}$ | kg·m² |
+| $m_1$ | 0.096567 | kg |
+| $l_1$ | 0.0070202 | m |
+| $L_1$ | 0.079073 | m |
+| $m_2$ | 0.021332 | kg |
+| $l_2$ | 0.066611 | m |
+| $L_2$ | 0.0859 | m |
+| $\hat J_2$ (`J_yy`) | $1.0513\times10^{-4}$ | kg·m² |
+| $J_{2xx}$ (`J_xx`) | $9.9256\times10^{-7}$ | kg·m² |
 | $g$ | 9.81 | m/s² |
+
+Per $L_2$: l'altezza del bounding box CAD del pendolo è 97.9 mm, di cui 12 mm di materiale di accoppiamento sopra la cerniera.
 
 Grandezze derivate utili:
 
-$$m_2gl_2 = 9.55\times10^{-3}\ \mathrm{J}, \qquad E^\star = 2m_2gl_2 = 1.91\times10^{-2}\ \mathrm{J}, \qquad m_2L_1l_2 = 7.57\times10^{-5}\ \mathrm{kg\,m^2}$$
+$$m_2gl_2 = 1.394\times10^{-2}\ \mathrm{J}, \qquad E^\star = 2m_2gl_2 = 2.788\times10^{-2}\ \mathrm{J}, \qquad m_2L_1l_2 = 1.124\times10^{-4}\ \mathrm{kg\,m^2}$$
 
 $$\dot\theta_{max} = 2\pi\frac{3850}{60} \approx 403\ \mathrm{rad/s}$$
 
 **Incertezze note da chiarire** (finiscono nella roadmap):
 
-- il valore di `J_yy` non coincide con la stima di un'asta uniforme ($m_2L_2^2/3 \approx 6.2\times10^{-5}\ \mathrm{kg\,m^2}$): è quindi un dato identificato/CAD o riferito a una geometria non uniforme, e va documentato;
-- `J_xx` non entra né nel modello semplificato né nel codice attuale;
+- $\hat J_2$ è il valore CAD (trasporto alla cerniera incluso): è circa il doppio della stima di un'asta uniforme ($m_2L_2^2/3 \approx 5.25\times10^{-5}\ \mathrm{kg\,m^2}$), coerente con la massa concentrata verso la punta ($l_2/L_2 \approx 0.78$);
+- `J_xx` è il momento rispetto all'asse longitudinale del pendolo ($\approx 0$ per un pendolo snello) e non entra né nel modello semplificato né nel codice attuale;
 - `mu` è dichiarata ma non compare in nessuna formula;
 - $\hat J_0$ non è calcolabile finché non si dispone di $J_1$ o di una misura complessiva dell'inerzia vista dal motore.
 
@@ -284,7 +288,7 @@ State rk4Step(const State& x, double tau, double h) {
 
 Assunzione di progetto: **$h = 1\ \mathrm{ms}$ (1 kHz)**, con coppia mantenuta costante tra due passi (ZOH). I tempi scala del sistema giustificano la scelta:
 
-- modo pendolare: $\omega_0 = \sqrt{m_2gl_2/\hat J_2} \approx 6\ \mathrm{rad/s}$ ($\approx 1$ s di periodo);
+- modo pendolare: $\omega_0 = \sqrt{m_2gl_2/\hat J_2} \approx 11.5\ \mathrm{rad/s}$ ($\approx 0.55$ s di periodo);
 - braccio a regime massimo: $403\ \mathrm{rad/s}$ ($\approx 16$ ms/giro).
 
 Con $h = 1$ ms il transitorio più veloce è campionato con ampio margine. Note operative:
