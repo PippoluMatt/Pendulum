@@ -35,15 +35,23 @@ namespace furuta
         // fs_hz: frequenza di campionamento del loop [Hz]
         // qTheta, qOmega: rumore di processo (solo Kalman)
         // alpha, beta: guadagni (solo AlphaBeta)
+        // restHold_s: se l'angolo resta entro 2 LSB per questo tempo la
+        //   velocita' e' forzata a zero (0 = disabilitato).
+        // restZone_rad: semilarghezza attorno ad alpha = 0 in cui il lock e'
+        //   attivo: a 15 gradi si applica solo al pendolo appeso, mai a
+        //   SWING/BALANCE, dove alpha e' vicino a pi e serve la banda piena.
         AS5600VelocityEstimator(VelocityFilterMode mode,
                                 float fc_hz,
                                 float fs_hz,
                                 float qTheta = 1.0e-6f,
                                 float qOmega = 1.0e-2f,
                                 float alpha = 0.5f,
-                                float beta = 0.1667f) noexcept
+                                float beta = 0.1667f,
+                                float restHold_s = 0.0f,
+                                float restZone_rad = static_cast<float>(M_PI)) noexcept
             : mode_{mode}, invDt_{fs_hz}, dt_{1.0f / fs_hz},
-              alpha_{alpha}, beta_{beta}
+              alpha_{alpha}, beta_{beta}, restHold_{restHold_s},
+              restZone_{restZone_rad}
         {
             rc_ = 1.0f / (2.0f * static_cast<float>(M_PI) * fc_hz);
             betaLp_ = dt_ / (rc_ + dt_);
@@ -73,6 +81,10 @@ namespace furuta
             abAngle_ = angle_rad;
             abVelocity_ = 0.0f;
 
+            restAnchor_ = angle_rad;
+            restTime_ = 0.0f;
+            restLock_ = false;
+
             initialized_ = true;
         }
 
@@ -85,6 +97,41 @@ namespace furuta
             {
                 reset(angle_rad);
                 return 0.0f;
+            }
+
+            // A riposo l'uscita deve essere zero, non il dither di
+            // quantizzazione: nella zona di riposo, angolo fermo entro 2 LSB
+            // per restHold_ blocca a zero; un movimento vero sblocca.
+            const double restAngle = wrapPi(angle_rad);
+            if (restHold_ > 0.0f && std::abs(restAngle) <= restZone_)
+            {
+                if (std::abs(wrapPi(angle_rad - restAnchor_)) > restWindow_)
+                {
+                    restAnchor_ = angle_rad;
+                    restTime_ = 0.0f;
+                    restLock_ = false;
+                }
+                else if (!restLock_)
+                {
+                    restTime_ += dt_;
+                    if (restTime_ >= restHold_) restLock_ = true;
+                }
+                if (restLock_)
+                {
+                    // Allinea gli stati d'angolo e azzera la velocita': allo
+                    // sblocco l'innovazione riparte dall'ultimo campione.
+                    prevAngle_ = angle_rad;
+                    kAngle_ = angle_rad;
+                    kVelocity_ = 0.0f;
+                    abAngle_ = angle_rad;
+                    abVelocity_ = 0.0f;
+                    velocity_ = 0.0f;
+                    return 0.0f;
+                }
+            }
+            else
+            {
+                restLock_ = false;
             }
 
             switch (mode_)
@@ -187,6 +234,14 @@ namespace furuta
         const float beta_;
         double abAngle_{0.0};
         float abVelocity_{0.0f};
+
+        // Rest-lock
+        const float restHold_{0.0f};
+        const float restZone_{static_cast<float>(M_PI)};
+        float restAnchor_{0.0f};
+        float restTime_{0.0f};
+        bool restLock_{false};
+        static constexpr float restWindow_{2.0f * 2.0f * static_cast<float>(M_PI) / 4096.0f};
 
         double prevAngle_{0.0};
         bool initialized_{false};

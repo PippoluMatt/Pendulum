@@ -2,13 +2,14 @@
 #define SWING_SEQUENCE_HPP
 
 #include <furuta/math_utils.hpp>
+#include <furuta/lqr.hpp>
 
 namespace furuta {
 
 // Sequenza del solo sketch, condivisa con i test host.
 class SwingSequence {
 public:
-    enum class Phase { Homing, Settling, Waiting, Swing, Returning };
+    enum class Phase { Homing, Settling, Waiting, Swing, Balance, Returning };
     static constexpr double armLimit = 2.0 * M_PI;
     static constexpr double maxVelocity = 5.0;
     static constexpr double maxAcceleration = 20.0;
@@ -16,6 +17,12 @@ public:
     Phase phase{Phase::Homing};
     double velocityTarget{0.0};
     double acceleration{0.0};
+    double thetaReference{0.0}; // acquisito una sola volta per ogni cattura
+
+    bool controlsVelocity() const
+    {
+        return phase == Phase::Swing || phase == Phase::Balance;
+    }
 
     void update(const furuta::SensorData& s, double energyAcceleration, double dt)
     {
@@ -53,7 +60,8 @@ public:
                 quietTime = 0.0;
             }
             break;
-        case Phase::Swing: {
+        case Phase::Swing:
+        case Phase::Balance: {
             // Riserva 0.5 rad e una distanza di frenata stimata a 5 rad/s^2.
             // Usa la posizione continua e la velocita' MISURATA, non il target.
             const double distance = std::abs(s.theta);
@@ -64,27 +72,41 @@ public:
             // del loop) predirebbe una frenata inesistente e farebbe scattare
             // il rientro a vuoto (osservato sul banco: RETURN_LIMIT con
             // theta ~ -0.1). Nella fascia esterna la predizione resta attiva.
+            // In BALANCE la predizione vale solo se il pendolo e' uscito dal
+            // range LQR: dentro il range e' l'LQR a frenare e un picco di
+            // velocita' dell'arm interrompeva recuperi riusciti (osservato sul
+            // banco: RETURN_LIMIT con alpha 3.07, e_alpha -0.07). Il limite
+            // pieno resta sempre attivo come ultima riserva.
+            const bool predictive = phase == Phase::Swing || lqr.lostBalance(s);
             if (distance >= armLimit - 0.5
-                    || (distance >= armLimit - 5.0
+                    || (predictive && distance >= armLimit - 5.0
                         && distance + outwardSpeed * outwardSpeed / 10.0
                             >= armLimit - 0.5)) {
                 phase = Phase::Returning;
                 quietTime = 0.0;
                 break;
             }
+            if (phase == Phase::Swing && lqr.canCapture(s, maxAcceleration)) {
+                thetaReference = s.theta;
+                phase = Phase::Balance;
+            } else if (phase == Phase::Balance && lqr.lostBalance(s)) {
+                phase = Phase::Swing;
+            }
             // Il richiamo al centro rimuove la componente continua che prima
             // si accumulava integrando solo l'accelerazione energetica.
-            const double centeredAcceleration = furuta::clamp(
-                energyAcceleration - 1.0 * s.theta - 0.5 * velocityTarget,
+            // In Balance il riferimento e' invece la posizione di cattura.
+            const double requestedAcceleration = furuta::clamp(
+                phase == Phase::Balance ? lqr.compute(s, thetaReference)
+                    : energyAcceleration - 1.0 * s.theta - 0.5 * velocityTarget,
                 -maxAcceleration, maxAcceleration);
             const double previous = velocityTarget;
-            velocityTarget = furuta::clamp(previous + centeredAcceleration * dt,
+            velocityTarget = furuta::clamp(previous + requestedAcceleration * dt,
                                             -maxVelocity, maxVelocity);
             acceleration = (velocityTarget - previous) / dt;
             break;
         }
         }
-        if (phase != Phase::Swing) velocityTarget = 0.0;
+        if (!controlsVelocity()) velocityTarget = 0.0;
     }
 
     const char* name() const
@@ -94,12 +116,14 @@ public:
         case Phase::Settling: return "SETTLING";
         case Phase::Waiting: return "WAIT_PUSH";
         case Phase::Swing: return "SWING";
+        case Phase::Balance: return "BALANCE";
         case Phase::Returning: return "RETURN_LIMIT";
         }
         return "";
     }
 
 private:
+    LqrController lqr;
     double quietTime{0.0};
     double restAlpha{0.0};
 };

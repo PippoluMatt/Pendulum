@@ -1,8 +1,8 @@
 # Pendolo di Furuta — modello non lineare, simulazione e controllo
 
-Questo repository raccoglie il codice C++17 e gli strumenti di sviluppo per un **pendolo di Furuta**: un sistema meccanico *sottattuato* (due gradi di libertà, un solo attuatore), fortemente non lineare, usato come banco di prova per tecniche di controllo. L'obiettivo del progetto è portare il pendolo dalla posizione di riposo (appeso) alla verticale tramite una legge di **swing-up a energia** e, in prospettiva, mantenerlo in equilibrio con un controllore di stabilizzazione.
+Questo repository raccoglie il codice C++17 e gli strumenti di sviluppo per un **pendolo di Furuta**: un sistema meccanico *sottattuato* (due gradi di libertà, un solo attuatore), fortemente non lineare, usato come banco di prova per tecniche di controllo. L'obiettivo del progetto è portare il pendolo dalla posizione di riposo (appeso) alla verticale tramite una legge di **swing-up a energia** e mantenerlo in equilibrio con un controllore LQR.
 
-> **Stato del progetto.** Il solutore Runge-Kutta 4 e il controllore di stabilizzazione in cima sono **design previsto e non ancora implementati**; la tabella in [§11](#11-stato-dellimplementazione-e-roadmap) distingue ciò che è operativo da ciò che è pianificato. Il resto è codice reale: parametri, modello dinamico, filtri di velocità, energia e legge di swing-up (con target sotto la verticale), sequenza di avvio (`swing_sequence.hpp`), mappatura $\ddot\theta \to \tau \to i \to V$, stima di $k_t$/$k_V$, smoke test host (`main.cpp`) e firmware board (`main.ino`, SimpleFOC + due AS5600), di cui esiste un primo log del banco in `data/data.csv`.
+> **Stato del progetto.** Stabilizzatore LQR e commutazione swing-up ↔ bilanciamento sono implementati e verificati con test host, **non ancora validati sul banco**. La cattura completa dal basso con la taratura swing attuale resta da ottenere: vedere [§7.5](#75-stabilizzazione-lqr-e-cattura). RK4 è presente nel simulatore di test, non ancora come integratore di libreria. La tabella in [§11](#11-stato-dellimplementazione-e-roadmap) distingue implementazione e lavoro residuo. Sono presenti parametri, modello dinamico, filtri di velocità, energia e legge di swing-up, sequenza di avvio (`swing_sequence.hpp`), mappatura $\ddot\theta \to \tau \to i \to V$, smoke test host (`main.cpp`) e firmware board (`main.ino`, SimpleFOC + due AS5600).
 
 ## Indice
 
@@ -382,7 +382,7 @@ $$\ddot\theta_{cmd} = \operatorname{clamp}\!\left(-k\,\mathrm{errE}\,\dot\alpha\
 
 con $\ddot\theta_{max}$ configurabile e, in prospettiva, derivato da coppia e inerzia come discusso in [§8](#8-dallaccelerazione-comandata-al-motore). Va ricordato che `maxRPM` limita $\dot\theta$ ($\approx 403\ \mathrm{rad/s}$), **non** $\ddot\theta$.
 
-**Stato:** in `energy_swing_up.hpp` sono implementate $E$, $E_{target}$, $\mathrm{errE}$ e la legge di controllo con saturazione (`EnergySwingUpController::compute` → `controlOutput::armAcceleration`); $k$, $\ddot\theta_{max}$ e $f$ vivono in `EnergySwingUpConfig` (default da tarare: $k=500$, $\ddot\theta_{max}=100$, $f=1$). Lo sketch usa $k=500$, $\ddot\theta_{max}=20\ \mathrm{rad/s^2}$ e $f=0.95$.
+**Stato:** in `energy_swing_up.hpp` sono implementate $E$, $E_{target}$, $\mathrm{errE}$ e la legge di controllo con saturazione (`EnergySwingUpController::compute` → `controlOutput::armAcceleration`); $k$, $\ddot\theta_{max}$ e $f$ vivono in `EnergySwingUpConfig` (default da tarare: $k=500$, $\ddot\theta_{max}=100$, $f=1$). Lo sketch usa $k=500$, $\ddot\theta_{max}=25\ \mathrm{rad/s^2}$ e $f=1.10$. Il target **sopra** $E^\star$ è necessario: con $f\le1$ la pompa si spegne ($\mathrm{errE}\to0$) prima della verticale, quindi qualunque perdita ferma il pendolo sotto il corridoio di cattura dell'LQR (con $f=0.95$ la cattura non avviene nemmeno con attrito nullo).
 
 ### 7.4 Richiamo al centro e riferimento di velocità
 
@@ -393,6 +393,38 @@ $$\ddot\theta_{ctrl} = \operatorname{clamp}\!\left(\ddot\theta_{cmd} - 1.0\,\the
 $$v_{target} \leftarrow \operatorname{clamp}\!\left(v_{target} + \ddot\theta_{ctrl}\,\Delta t,\ -v_{max},\ +v_{max}\right), \qquad \ddot\theta_{ff} = \frac{v_{target} - v_{target}^{prev}}{\Delta t}$$
 
 con $v_{max}=5$ rad/s (`SwingSequence::maxVelocity`). Il richiamo al centro rimuove la componente continua che si accumulerebbe integrando solo l'accelerazione energetica; il riferimento di velocità rende il comando compatibile con l'anello PI di SimpleFOC ([§8](#8-dallaccelerazione-comandata-al-motore)) e nell'inversa del modello entra $\ddot\theta_{ff}$, non $\ddot\theta_{ctrl}$.
+
+### 7.5 Stabilizzazione LQR e cattura
+
+`LqrController` (`lqr.hpp`) stabilizza **$\alpha=\pm\pi$**, usando l'errore avvolto $e_\alpha=\operatorname{remainder}(\alpha-\pi,2\pi)$. Il braccio mantiene come riferimento $\theta_r$ la posizione continua acquisita a ogni ingresso in `BALANCE`, senza richiamo all'home durante il bilanciamento.
+
+L'ingresso del modello linearizzato è $u=\ddot\theta$, coerente con il PI di velocità esistente. Con $x=[\theta-\theta_r,e_\alpha,\dot\theta,\dot\alpha]^T$, la seconda equazione della dinamica dà:
+
+$$\dot x=Ax+Bu,\qquad
+A=\begin{bmatrix}0&0&1&0\\0&0&0&1\\0&0&0&0\\0&g_p/J_2&0&-b_2/J_2\end{bmatrix},\quad
+B=\begin{bmatrix}0\\0\\1\\c/J_2\end{bmatrix},$$
+
+dove $g_p=m_2gl_2$, $c=m_2L_1l_2$. Per i valori effettivi in `parameters.hpp`, incluso $b_2=0.0006$, con $Q=\operatorname{diag}(1,100,1,1)$ e $R=0.1$ si ottiene:
+
+$$u=-Kx,\qquad K=[-3.16227766017,\ 372.549511782,\ -4.76104548034,\ 25.4076741677].$$
+
+I poli nominali sono circa $-15.066,-9.101,-2.866,-1.067$ s⁻¹. `tools/lqr_design.cpp` risolve offline la [Riccati continua](https://docs.scipy.org/doc/scipy/reference/generated/scipy.linalg.solve_continuous_are.html) tramite il sottospazio stabile dell'Hamiltoniana, verifica residuo e poli e confronta i guadagni con quelli del firmware. **Se cambiano geometria, inerzia o attrito del pendolo, rigenerare e rivalidare i guadagni.** Non si eseguono decomposizioni matriciali nel loop della board.
+
+La commutazione usa queste condizioni iniziali di taratura:
+
+| Transizione | Condizioni |
+|---|---|
+| `SWING` → `BALANCE` | $|e_\alpha|\le\pi-2.3$, $|\dot\alpha|\le15$ rad/s e $|u_{LQR}(\theta_r=\theta)|\le25$ rad/s² |
+| `BALANCE` → `SWING` | $|e_\alpha|>\pi-2.1$ oppure $|\dot\alpha|>18$ rad/s |
+| `SWING` / `BALANCE` → `RETURN_LIMIT` | protezione del braccio di [§9.3](#93-homing-quiescenza-e-sequenza-di-avvio), valutata prima della cattura; in `BALANCE` la stima predittiva vale solo col pendolo fuori dal range LQR |
+
+Il vincolo sul comando d'ingresso combina angolo e velocità, incluso il moto del braccio: non basta raggiungere 2.3 rad quasi fermi. È un criterio di ammissibilità, **non una dimostrazione del bacino di cattura**. Le soglie di uscita introducono isteresi; la perdita d'equilibrio riprende subito lo swing senza nuova spinta. La protezione del braccio termina l'LQR e avvia il rientro, ma in `BALANCE` il solo termine predittivo non basta: scatta solo se il pendolo è già fuori dal range LQR, per non interrompere recuperi gestiti dall'LQR (osservato sul banco: `RETURN_LIMIT` con $e_\alpha=-0.07$). Il limite pieno $|\theta|\ge2\pi-0.5$ resta sempre attivo.
+
+In `BALANCE`, $u$ viene saturato a ±25 rad/s² e integrato nel riferimento di velocità limitato a ±5 rad/s; il feed-forward usa la variazione effettiva del riferimento dopo saturazione. Il PI, il suo integrale e il riferimento di velocità sono conservati nelle transizioni `SWING` ↔ `BALANCE`. Restano ±1 V per modello e ±1 V per PI. La diagnostica espone `State: BALANCE` e `Theta ref LQR` (ultimo riferimento acquisito).
+
+**Verifiche e limiti.** I test usano la dinamica non lineare, RK4, motore resistivo, PI/LPF, quantizzazione AS5600, stimatore AlphaBeta e ritardo di un campione. Verificano entrambi i lati, cattura da circa ±2.3 rad con velocità iniziale ±12 rad/s, mantenimento per circa 10 s, riferimento del braccio diverso da zero e rientro dal limite. Nell'ultimo secondo, i criteri sono errore pendolo <0.01 rad e braccio <0.02 rad a 0.75–1 ms; a 2 ms sono <2.1° e <0.18 rad, per le oscillazioni residue della catena attuale. Non sono prestazioni certificate sul banco, né una garanzia fisica di non oltrepassare i limiti di θ.
+
+La prova completa da una spinta di 20° in simulazione (dt=1 ms, $b_1=0.0006$, $b_2=2\times10^{-5}$, `TARGET_ENERGY_FRACTION=1.10`) cattura a $\approx2.6$ s e mantiene la verticale per il resto della prova, senza `RETURN_LIMIT`. $b_2$ **non è identificato sul banco**: con $b_2\ge10^{-4}$ l'autorità di pompaggio attuale ($v_{max}=5$ rad/s, $\ddot\theta_{max}=25$ rad/s²) non basta e la cattura non avviene; in quel caso servono più coppia o velocità di pompaggio. La prova sul banco deve confermare cattura, riferimento e tempo d'ingresso.
 
 ---
 
@@ -444,7 +476,8 @@ pendulum/
 │   │   ├── math_utils.hpp          # rpm→rad/s, clamp, homing, referenceAngle
 │   │   ├── dynamics.hpp            # M, h, G (Eigen); dinamica diretta e inversa
 │   │   ├── energy_swing_up.hpp     # E, E_target, errE + legge di swing-up saturata
-│   │   ├── swing_sequence.hpp      # macchina a stati homing→attesa→swing→rientro
+│   │   ├── lqr.hpp                # LQR in accelerazione, errore verticale e cattura
+│   │   ├── swing_sequence.hpp      # homing→attesa→swing↔bilanciamento, rientro limite
 │   │   └── motor.hpp               # stima di kt e kV; tau→i→V
 │   ├── src/
 │   │   ├── main.cpp                # smoke test host della catena errE→θ̈→τ
@@ -452,7 +485,8 @@ pendulum/
 │   ├── data/
 │   │   ├── data_extraction.py      # logger seriale → CSV
 │   │   └── data.csv                # log del banco del 29/09 (avvio FOC + HOMING/SETTLING)
-│   └── tests/                      # vuoto nel repo: i test host vivono fuori (progetto Arduino)
+│   ├── tools/lqr_design.cpp        # calcolo offline e verifica dei guadagni LQR
+│   └── tests/                      # regressioni LQR/sequenza e simulazione non lineare
 └── README.md
 ```
 
@@ -499,7 +533,8 @@ La sequenza che usa queste utilità è `SwingSequence` (`swing_sequence.hpp`), i
 - `HOMING` → `SETTLING`: quiete sul riferimento per 0.2 s, poi pendolo fermo vicino al basso per 1 s continuo (entro 5°, sotto 0.15 rad/s);
 - `WAITING` (`WAIT_PUSH` nel log): memorizza l'angolo di riposo e attende una spinta di almeno 10° per 20 ms (una perturbazione da 0.02 rad non deve avviare il pompaggio);
 - `SWING`: legge energetica di [§7](#7-controllo-di-swing-up-a-energia) con richiamo al centro e riferimento di velocità;
-- `RETURNING`: sospende lo swing e riporta il braccio allo zero quando $|\theta| \ge 2\pi - 0.5$, oppure quando la frenata stimata a 5 rad/s² lo porterebbe oltre il limite nella fascia esterna ($|\theta| \ge 2\pi - 5$). La riserva è una stima, non un finecorsa fisico.
+- `BALANCE`: LQR sulla verticale con riferimento del braccio acquisito all'ingresso; perdita di equilibrio → `SWING`, senza attesa ([§7.5](#75-stabilizzazione-lqr-e-cattura));
+- `RETURNING`: sospende swing o LQR e riporta il braccio allo zero quando $|\theta| \ge 2\pi - 0.5$, oppure quando la frenata stimata a 5 rad/s² lo porterebbe oltre il limite nella fascia esterna ($|\theta| \ge 2\pi - 5$). In `BALANCE` la stima predittiva si applica solo se il pendolo è fuori dal range LQR: dentro il range l'LQR resta responsabile del recupero e vale solo il limite pieno. La riserva è una stima, non un finecorsa fisico.
 
 In `SETTLING` e `WAITING` il driver è disabilitato: il log del banco mostra che il hold a centro con il PI di velocità va in *stick-slip* (l'integrale carica contro l'attrito statico, poi slitta e la spinta eccita il pendolo), quindi in attesa il braccio resta libero e il pendolo si smorza da solo.
 
@@ -516,10 +551,12 @@ Requisiti: CMake $\ge 3.16$, compilatore C++17, Eigen 3.3+ (`libeigen3-dev`; `CM
 ```bash
 cmake -S furuta -B build
 cmake --build build
+ctest --test-dir build --output-on-failure
 ./build/furuta
+./build/lqr_design
 ```
 
-`main.cpp` stampa i valori di `kt` e `kV` nelle due modalità del motore e uno smoke test della catena $\mathrm{errE} \to \ddot\theta_{cmd} \to \tau$ con verifica dell'inversa. Il firmware board `furuta/src/main.ino` non è compilato da CMake: richiede l'ambiente Arduino con la libreria `furuta` (copia di `furuta/include`), [SimpleFOC](https://simplefoc.com/) e ArduinoEigen. Per il logger seriale (richiede `pyserial`, il venv del repository è già presente):
+`main.cpp` stampa i valori di `kt` e `kV` nelle due modalità del motore e uno smoke test della catena $\mathrm{errE} \to \ddot\theta_{cmd} \to \tau$ con verifica dell'inversa. CTest esegue `lqr_gains` (Riccati e coerenza dei guadagni) e `lqr_control` (linearizzazione numerica, wrapping, sequenza e simulazioni). Il firmware board `furuta/src/main.ino` non è compilato da CMake: richiede l'ambiente Arduino con la libreria `furuta` (copia aggiornata di `furuta/include`, inclusi `lqr.hpp` e `swing_sequence.hpp`), [SimpleFOC](https://simplefoc.com/) e ArduinoEigen. Per il logger seriale (richiede `pyserial`, il venv del repository è già presente):
 
 ```bash
 python furuta/data/data_extraction.py
@@ -539,7 +576,7 @@ Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, perc
 | Lettura angoli | `main.ino` | ✅ su board | braccio via SimpleFOC (`Wire`), pendolo via `Wire1` con offset $\pi$; `main.cpp` resta smoke test host |
 | Stima velocità | `velocity_filters.hpp` | ✅ implementata | tre stimatori con `update(angle, dt)`; per il braccio si usa `motor.shaft_velocity` di SimpleFOC |
 | Homing / quiete | `math_utils.hpp` | ✅ implementata | usata da `SwingSequence` |
-| Sequenza di avvio | `swing_sequence.hpp` | ✅ implementata | HOMING→SETTLING→WAIT_PUSH→SWING→RETURN_LIMIT; driver disabilitato in attesa/assestamento |
+| Sequenza di avvio | `swing_sequence.hpp` | ✅ implementata | HOMING→SETTLING→WAIT_PUSH→SWING↔BALANCE; RETURN_LIMIT prioritario; driver disabilitato in attesa/assestamento |
 | Energia pendolo ($E$, $E_{target}$, `errE`) | `energy_swing_up.hpp` | ✅ implementata | `targetEnergyFraction` (0.95 nello sketch) |
 | Legge di swing-up + saturazione | `energy_swing_up.hpp` | ✅ implementata | `compute` → `controlOutput::armAcceleration`; $k=500$, $\ddot\theta_{max}=20$ rad/s² nello sketch |
 | Richiamo al centro + riferimento di velocità | `swing_sequence.hpp` | ✅ implementata | $\ddot\theta_{ff}$ dall'accelerazione effettiva del riferimento ([§7.4](#74-richiamo-al-centro-e-riferimento-di-velocità)) |
@@ -548,9 +585,9 @@ Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, perc
 | RK4 + `stateDerivative` | — | ❌ da implementare | progetto: $h = 1$ ms, ZOH |
 | Mappatura $\ddot\theta \to \tau \to i \to V$ | `dynamics.hpp`, `motor.hpp` | ✅ implementata | $\ddot\theta \to \tau$ esatta (inversa con cerniera passiva); $\tau \to i \to V$ in `Motor` con $R$ provvisorio; $i_{max}$/$\tau_{max}$ da identificare |
 | Log CSV | `data/data_extraction.py` | ✅ presente | `data.csv` con primo log del banco; flush senza parentesi |
-| Test host | `tests/` (repo) | ⚠️ fuori repo | `tests/` vuoto; i test girano nel progetto Arduino `energy_swing_up/tests` (filtri, tempi di swing-up, sequenza) |
+| Test host | `tests/`, `tools/lqr_design.cpp` | ✅ LQR nel repo | CTest: guadagni, commutazione e simulazioni; altri test storici nel progetto Arduino `energy_swing_up/tests` |
 | Firmware board (SimpleFOC + AS5600) | `main.ino` | ✅ presente | eseguito sul banco il 29/09 (HOMING/SETTLING); taratura reale da completare |
-| Controllore di stabilizzazione | — | ❌ da fare | — |
+| Controllore di stabilizzazione | `lqr.hpp`, `swing_sequence.hpp` | ✅ implementato, da validare sul banco | ingresso su angolo/velocità, riferimento alla cattura, recupero swing e limite prioritario; §7.5 |
 
 ### 11.2 Roadmap
 
@@ -559,7 +596,7 @@ Lo script ha percorso porta e file di output **hardcoded** (`/dev/ttyACM0`, perc
 3. **Legge di swing-up + sequenza**: ✅ implementate e verificate con test host (RK4 esterno). Con spinta, $f=0.95$, $k=500$, PI e richiamo al centro il target si raggiunge in ~4 s in simulazione; $k$, $\ddot\theta_{max}$ e $f$ restano da tarare sul banco (il log del 29/09 si ferma a `SETTLING`).
 4. **Identificazione**: $b_1, b_2$, $R$ (oggi provvisorio in `phaseResistance`), $\tau_{max}$, $i_{max}$; revisione di $k_t, k_V$ e della costante $3.30$.
 5. **Port su board**: ✅ prima esecuzione sul banco (SimpleFOC + due AS5600, homing, `SwingSequence`, diagnostica a blocchi). Restano verifica della frequenza reale del loop rispetto a $h$ (il log riporta `dt max us`) e dei segni/offset; poi lo swing completo.
-6. **Stabilizzazione**: controllore in cima (LQR o PID con scheduling) e logica di commutazione swing-up ↔ stabilize.
+6. **Stabilizzazione**: ✅ LQR e commutazione implementati con verifiche host; restano identificazione/taratura e cattura completa dal basso sul banco (§7.5).
 7. **Test e analisi**: portare i test host dentro `furuta/tests/`, pulire il logger e costruire l'analisi dei CSV.
 
 ---
