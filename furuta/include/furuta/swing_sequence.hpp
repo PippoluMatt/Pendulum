@@ -12,7 +12,7 @@ public:
     enum class Phase { Homing, Settling, Waiting, Swing, Balance, Returning };
     static constexpr double armLimit = 2.0 * M_PI;
     static constexpr double maxVelocity = 5.0;
-    static constexpr double maxAcceleration = 20.0;
+    static constexpr double maxAcceleration = 25.0;
 
     Phase phase{Phase::Homing};
     double velocityTarget{0.0};

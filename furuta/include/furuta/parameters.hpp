@@ -54,8 +54,8 @@ struct ArmParameters
 // Non ancora identificati: default a zero, il modello resta completo.
 struct FrictionParameters
 {
-    double armViscous{0.0006};       // b1 [N*m*s/rad]
-    double pendulumViscous{0.0006};  // b2 [N*m*s/rad]
+    double armViscous{0.0010};       // b1 [N*m*s/rad]
+    double pendulumViscous{0.0010};  // b2 [N*m*s/rad]
 };
 
 } // namespace furuta
